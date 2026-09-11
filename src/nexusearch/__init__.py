@@ -1,5 +1,6 @@
 """Universal multi-iteration web search (profile-driven, no domain defaults)."""
 
+from nexusearch.async_client import AsyncNexusSearchClient, SearchHooks
 from nexusearch.client import NexusSearchClient
 from nexusearch.config import NexusSearchSettings
 from nexusearch.discovery import (
@@ -21,6 +22,7 @@ from nexusearch.models import (
 from nexusearch.profile import SearchProfile
 
 __all__ = [
+    "AsyncNexusSearchClient",
     "DiscoveryAdapter",
     "DuckDuckGoAdapter",
     "HintConfidence",
@@ -32,6 +34,7 @@ __all__ = [
     "PageSnippet",
     "SearchBundle",
     "SearchHit",
+    "SearchHooks",
     "SearchMeta",
     "SearchProfile",
     "TavilyAdapter",
