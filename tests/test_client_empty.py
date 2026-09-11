@@ -36,20 +36,21 @@ def test_empty_search(monkeypatch):
     monkeypatch.setattr(
         client_mod,
         "discover_for_queries",
-        lambda *a, **k: ([], []),
+        lambda *a, **k: ([], [], []),
     )
     bundle = NexusSearchClient(profile=FakeProfile()).search(
         "anything", NexusSearchOptions(max_deep_read=0, enable_iter2=False)
     )
     assert bundle.hits == []
     assert bundle.meta.message == "No live search hits found."
+    assert bundle.meta.engines_with_hits == []
 
 
 def test_deep_read_count(monkeypatch):
     hit = SearchHit(title="A", url="https://a.example", domain="a.example")
 
     def fake_discover(*a, **k):
-        return [hit], ["ddg"]
+        return [hit], ["ddg"], ["ddg"]
 
     def fake_deep(hits, **kwargs):
         enriched = []
@@ -71,6 +72,7 @@ def test_deep_read_count(monkeypatch):
         NexusSearchOptions(max_deep_read=5, enable_iter2=False, max_hits=10),
     )
     assert bundle.meta.deep_read_count == 1
+    assert bundle.meta.engines_with_hits == ["ddg"]
     assert bundle.hits[0].page_evidence is not None
 
 

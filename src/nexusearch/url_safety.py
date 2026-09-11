@@ -5,11 +5,14 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import logging
+import re
 import socket
 import ssl
 from urllib.parse import urljoin, urlsplit
 
 logger = logging.getLogger(__name__)
+
+MAX_RESPONSE_BYTES = 2_000_000
 
 _BLOCKED_HOSTNAMES = frozenset(
     {
@@ -20,39 +23,86 @@ _BLOCKED_HOSTNAMES = frozenset(
     }
 )
 
+# Conservative multi-part public suffixes (not a full PSL).
+_MULTI_PART_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "com.au",
+        "co.nz",
+        "co.jp",
+        "com.br",
+        "co.kr",
+        "com.mx",
+        "co.in",
+        "org.uk",
+        "net.au",
+    }
+)
+
+_UNSAFE_HOST_RE = re.compile(r"[%\x00-\x1f\x7f]|。|．")
+
 
 def is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-        or ip in (ipaddress.ip_address("169.254.169.254"),)
-    )
+    """
+    Reject any non-global address (SSRF harden).
+
+    Prefer allowlist ``ip.is_global`` over private denylist so CGNAT
+    (100.64.0.0/10), documentation, and other non-global ranges are blocked.
+    """
+    return not bool(ip.is_global)
+
+
+def normalize_hostname(host: str) -> str | None:
+    """Normalize hostname for policy checks. None if unsafe / empty."""
+    raw = (host or "").strip().lower().rstrip(".")
+    if not raw or raw in _BLOCKED_HOSTNAMES or raw.endswith(".localhost"):
+        return None
+    if _UNSAFE_HOST_RE.search(raw):
+        return None
+    if "/" in raw or "\\" in raw or "@" in raw or " " in raw:
+        return None
+    try:
+        # IDNA for non-ascii labels; ascii hosts pass through.
+        return raw.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        return None
+
+
+def _label_count(host: str) -> int:
+    return len([p for p in host.split(".") if p])
 
 
 def registrable_overlap(host_a: str, host_b: str) -> bool:
-    """True if hosts are equal or one is a subdomain of the other."""
-    a = (host_a or "").lower().removeprefix("www.")
-    b = (host_b or "").lower().removeprefix("www.")
-    if not a or not b:
+    """
+    True if hosts are equal or one is a subdomain of the other.
+
+    Rejects single-label expected domains (e.g. 'com') and bare multi-part
+    public suffixes (e.g. 'co.uk') to reduce spoofing without a full PSL.
+    """
+    a_n = normalize_hostname(host_a)
+    b_n = normalize_hostname(host_b)
+    if not a_n or not b_n:
+        return False
+    a = a_n.removeprefix("www.")
+    b = b_n.removeprefix("www.")
+    if _label_count(b) < 2 or b in _MULTI_PART_SUFFIXES:
+        return False
+    if _label_count(a) < 2:
         return False
     return a == b or a.endswith("." + b) or b.endswith("." + a)
 
 
 def resolve_public_ip(host: str) -> str | None:
     """
-    Resolve host once. Reject if any answer is blocked; return first public IP.
+    Resolve host once. Reject if any answer is non-global; return first global IP.
     Empty / failure → None.
     """
-    host = (host or "").lower().strip()
-    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
+    host_n = normalize_hostname(host)
+    if not host_n:
         return None
 
     try:
-        literal = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(host_n)
         if is_blocked_ip(literal):
             return None
         return str(literal)
@@ -60,9 +110,9 @@ def resolve_public_ip(host: str) -> str | None:
         pass
 
     try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host_n, None, type=socket.SOCK_STREAM)
     except socket.gaierror:
-        logger.debug("DNS resolve failed for host=%s", host)
+        logger.debug("DNS resolve failed for host=%s", host_n)
         return None
 
     public: list[str] = []
@@ -75,7 +125,7 @@ def resolve_public_ip(host: str) -> str | None:
         except ValueError:
             continue
         if is_blocked_ip(ip):
-            logger.debug("Blocked private/metadata IP %s for host=%s", ip, host)
+            logger.debug("Blocked non-global IP %s for host=%s", ip, host_n)
             return None
         public.append(str(ip))
     return public[0] if public else None
@@ -102,8 +152,8 @@ def check_url_host(
     elif scheme != "https":
         return None
 
-    host = (parsed.hostname or "").lower()
-    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
+    host = normalize_hostname(parsed.hostname or "")
+    if not host:
         return None
 
     if expected_domain and not registrable_overlap(host, expected_domain):
@@ -126,8 +176,8 @@ def is_safe_url(
     resolve_dns: bool = True,
 ) -> bool:
     """
-    Allow only public http(s) URLs. Optionally require host to match expected_domain
-    and reject hosts that resolve to private/metadata addresses.
+    Allow only global http(s) URLs. Optionally require host to match expected_domain
+    and reject hosts that resolve to non-global addresses.
     """
     host = check_url_host(url, expected_domain=expected_domain, allow_http=allow_http)
     if host is None:
@@ -137,6 +187,22 @@ def is_safe_url(
         return True
 
     return resolve_public_ip(host) is not None
+
+
+def _read_limited(resp: http.client.HTTPResponse, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = resp.read(min(64 * 1024, max_bytes - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            logger.debug("Response truncated at %s bytes", max_bytes)
+            chunks.append(chunk[: max(0, max_bytes - (total - len(chunk)))])
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -149,7 +215,8 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
-        assert self._context is not None
+        if self._context is None:
+            raise RuntimeError("SSL context missing for pinned HTTPS connection")
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
@@ -160,6 +227,7 @@ def pinned_https_get(
     timeout: float = 8.0,
     headers: dict[str, str] | None = None,
     max_redirects: int = 5,
+    max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> tuple[int, str, str]:
     """
     GET via DNS-pinned IP. Returns (status_code, final_url, body_text).
@@ -167,7 +235,7 @@ def pinned_https_get(
     """
     current = url
     req_headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; DeepWebSearch/0.1; +https://example.local)",
+        "User-Agent": "Mozilla/5.0 (compatible; Nexusearch/0.1; +https://example.local)",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Connection": "close",
@@ -184,7 +252,7 @@ def pinned_https_get(
         if (parsed.scheme or "").lower() != "https":
             return 0, current, ""
 
-        host = (parsed.hostname or "").lower()
+        host = normalize_hostname(parsed.hostname or "")
         if not host or not registrable_overlap(host, expected_domain):
             return 0, current, ""
 
@@ -204,7 +272,7 @@ def pinned_https_get(
             resp = conn.getresponse()
             status = resp.status
             loc = resp.getheader("Location")
-            body = resp.read()
+            body = _read_limited(resp, max_bytes=max_bytes)
             if status in (301, 302, 303, 307, 308) and loc:
                 current = urljoin(current, loc)
                 continue

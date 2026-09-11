@@ -63,6 +63,7 @@ class NexusSearchClient:
         ignored = tuple(self.profile.ignored_domains)
         queries_used: list[str] = []
         engines: list[str] = []
+        engines_with_hits: list[str] = []
         iterations_run = 0
 
         iter1 = self.profile.plan_iter1(
@@ -71,7 +72,7 @@ class NexusSearchClient:
             max_queries=opts.max_iter1_queries,
         )
         queries_used.extend(iter1)
-        hits, eng1 = discover_for_queries(
+        hits, eng1, hit1 = discover_for_queries(
             iter1,
             tavily_api_key=self.tavily_api_key,
             proxy=proxy,
@@ -82,6 +83,9 @@ class NexusSearchClient:
         for e in eng1:
             if e not in engines:
                 engines.append(e)
+        for e in hit1:
+            if e not in engines_with_hits:
+                engines_with_hits.append(e)
         iterations_run = 1
 
         if opts.enable_iter2 and hits:
@@ -93,7 +97,7 @@ class NexusSearchClient:
             )
             if iter2:
                 queries_used.extend(iter2)
-                hits, eng2 = discover_for_queries(
+                hits, eng2, hit2 = discover_for_queries(
                     iter2,
                     tavily_api_key=self.tavily_api_key,
                     proxy=proxy,
@@ -105,6 +109,9 @@ class NexusSearchClient:
                 for e in eng2:
                     if e not in engines:
                         engines.append(e)
+                for e in hit2:
+                    if e not in engines_with_hits:
+                        engines_with_hits.append(e)
                 iterations_run = 2
 
         hits = hits[: opts.max_hits]
@@ -112,14 +119,16 @@ class NexusSearchClient:
         deep_read_count = 0
         if hits and opts.max_deep_read > 0:
             deep_budget = min(opts.max_deep_read, opts.max_domains_before_deep_read, len(hits))
+            fc_key = self.firecrawl_api_key if opts.allow_firecrawl else None
             hits = deep_read_hits(
                 hits,
                 profile=self.profile,
                 max_deep_read=deep_budget,
-                firecrawl_api_key=self.firecrawl_api_key,
+                firecrawl_api_key=fc_key,
                 proxy=proxy,
                 max_fetch_attempts=opts.max_fetch_attempts,
                 max_deep_read_seconds=opts.max_deep_read_seconds,
+                allow_firecrawl=opts.allow_firecrawl,
             )
             deep_read_count = sum(
                 1 for h in hits if h.page_evidence is not None and h.page_evidence.pages
@@ -129,16 +138,18 @@ class NexusSearchClient:
         if not hits:
             message = _EMPTY_MSG
             logger.info(
-                "Nexusearch empty query=%s profile=%s engines=%s",
+                "Nexusearch empty query=%s profile=%s engines=%s engines_with_hits=%s",
                 query,
                 getattr(self.profile, "name", "?"),
                 engines,
+                engines_with_hits,
             )
 
         meta = SearchMeta(
             iterations_run=iterations_run,
             queries_used=queries_used,
             engines=engines,
+            engines_with_hits=engines_with_hits,
             deep_read_count=deep_read_count,
             message=message,
         )

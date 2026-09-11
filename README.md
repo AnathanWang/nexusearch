@@ -66,9 +66,16 @@ print(bundle.meta)
 
 ## Safety
 
-- Direct deep-read is **https-only**, DNS-pinned, rejects private/metadata IPs.
+- Direct deep-read is **https-only**, DNS-pinned, and allows **only global IPs** (`ip.is_global`) — CGNAT/`100.64.0.0/10` and other non-global ranges are rejected.
+- Response bodies are capped (`MAX_RESPONSE_BYTES`, default 2 MiB).
+- Deep-read respects a hard monotonic deadline across domains **and** paths.
 - Proxy mode is allowlist + DNS blocklist (proxy is a trust boundary).
-- Firecrawl is a separate cloud trust boundary.
+- **Firecrawl** is an out-of-process cloud fetch: local DNS pre-check is **advisory** (TOCTOU). API calls use a dedicated httpx client (not the page-fetch proxy). Disable with `NexusSearchOptions(allow_firecrawl=False)`.
+
+## Meta telemetry
+
+- `meta.engines` — adapters that returned a successful response (attempted)
+- `meta.engines_with_hits` — adapters that contributed at least one merged domain
 
 ## Env
 

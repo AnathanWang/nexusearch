@@ -36,6 +36,7 @@ class SearchMeta(BaseModel):
     iterations_run: int = 0
     queries_used: list[str] = Field(default_factory=list)
     engines: list[str] = Field(default_factory=list)
+    engines_with_hits: list[str] = Field(default_factory=list)
     deep_read_count: int = 0
     message: str | None = None
 
@@ -50,6 +51,7 @@ class NexusSearchOptions(BaseModel):
     proxy_url: str | None = None
     max_fetch_attempts: int = 2
     max_deep_read_seconds: float = 25.0
+    allow_firecrawl: bool = True
 
 
 class SearchBundle(BaseModel):

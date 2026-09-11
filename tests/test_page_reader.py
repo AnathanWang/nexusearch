@@ -104,7 +104,7 @@ def test_deep_read_budget_stops_early(monkeypatch):
 def test_hints_include_source_url_and_confidence(monkeypatch):
     monkeypatch.setattr(pr, "is_safe_url", lambda *a, **k: True)
 
-    def fake_pinned(url, *, expected_domain, attempts=2, timeout=8.0):
+    def fake_pinned(url, *, expected_domain, attempts=2, timeout=8.0, deadline=None):
         return (
             "US-based manufacturer. Minimum order 50 units. "
             "Catalog of 400 skus. We offer dropship. " + ("body " * 80)
@@ -121,3 +121,35 @@ def test_hints_include_source_url_and_confidence(monkeypatch):
     assert ev.extracted.get("sku_count") == 400
     assert ev.extracted.get("dropship") is True
     assert ev.hint_confidence in ("MEDIUM", "HIGH")
+
+
+def test_deadline_skips_remaining_paths(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(pr.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(pr, "check_url_host", lambda *a, **k: "vendor.example")
+    calls = {"n": 0}
+
+    def fake_pinned(url, **kwargs):
+        calls["n"] += 1
+        clock["t"] += 10.0
+        return "US-based " + ("x" * 400)
+
+    monkeypatch.setattr(pr, "_pinned_fetch_text", fake_pinned)
+    monkeypatch.setattr(pr, "_firecrawl_fetch", lambda *a, **k: "")
+
+    hit = SearchHit(title="V", url="https://vendor.example/", domain="vendor.example")
+    profile = HintProfile()
+    profile.deep_paths = ("/", "/about", "/dealer", "/wholesale")  # type: ignore[misc]
+    deadline = 5.0  # already exceeded after first path bumps clock... start at 0, first path ok
+    # Start deadline at 15 so first path (0→10) ok, second (10→20) blocked at start of loop when t>=15
+    clock["t"] = 0.0
+    ev = read_domain_evidence(
+        hit,
+        profile=profile,
+        max_pages=4,
+        deadline=15.0,
+        allow_firecrawl=False,
+    )
+    assert calls["n"] == 2  # path1 at t=0, path2 at t=10; path3 blocked at t=20>=15 before fetch... 
+    # After path1: t=10, path2 starts t=10 < 15, fetch → t=20, path3 starts t=20 >= 15 break
+    assert len(ev.pages) == 2

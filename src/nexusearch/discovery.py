@@ -260,24 +260,33 @@ def discover_for_queries(
     max_hits: int,
     ignored_domains: Sequence[str] = (),
     existing: list[SearchHit] | None = None,
-) -> tuple[list[SearchHit], list[str]]:
-    """Run discovery for each query; return merged hits and engines used."""
+) -> tuple[list[SearchHit], list[str], list[str]]:
+    """
+    Run discovery for each query.
+
+    Returns (hits, engines_attempted, engines_with_hits).
+    """
     hits = list(existing or [])
     engines: list[str] = []
+    engines_with_hits: list[str] = []
     per_query = max(3, max_hits // max(len(queries), 1) + 2)
 
     for q in queries:
         if len(hits) >= max_hits:
             break
         needed = max_hits - len(hits)
+        before = len(hits)
         t_hits, t_used = search_tavily(
             q, api_key=tavily_api_key, max_results=min(per_query, needed), iteration=iteration
         )
         if t_used and "tavily" not in engines:
             engines.append("tavily")
         hits = merge_hits(hits, t_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+        if len(hits) > before and "tavily" not in engines_with_hits:
+            engines_with_hits.append("tavily")
         if len(hits) >= max_hits:
             break
+        before = len(hits)
         d_hits, d_used = search_ddg(
             q,
             max_results=min(per_query, max_hits - len(hits)),
@@ -288,5 +297,7 @@ def discover_for_queries(
         if d_used and "ddg" not in engines:
             engines.append("ddg")
         hits = merge_hits(hits, d_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+        if len(hits) > before and "ddg" not in engines_with_hits:
+            engines_with_hits.append("ddg")
 
-    return hits, engines
+    return hits, engines, engines_with_hits

@@ -15,6 +15,7 @@ from nexusearch.http_util import request_with_retries
 from nexusearch.models import PageEvidence, PageSnippet, SearchHit
 from nexusearch.profile import SearchProfile
 from nexusearch.url_safety import (
+    MAX_RESPONSE_BYTES,
     check_url_host,
     is_safe_url,
     pinned_https_get,
@@ -31,6 +32,10 @@ _DEFAULT_UA = {
 }
 
 
+def _deadline_exceeded(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
 def _html_to_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
@@ -45,10 +50,13 @@ def _proxy_fetch_text(
     expected_domain: str,
     attempts: int = 2,
     timeout: float = 8.0,
+    deadline: float | None = None,
 ) -> str:
     """Fetch via trusted proxy (proxy egress; URL still allowlisted)."""
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
+        if _deadline_exceeded(deadline):
+            return ""
         if not is_safe_url(current, expected_domain=expected_domain):
             return ""
         try:
@@ -75,7 +83,13 @@ def _proxy_fetch_text(
         final_host = urlsplit(str(resp.url)).hostname or ""
         if not registrable_overlap(final_host, expected_domain):
             return ""
-        return _html_to_text(resp.text)
+        # Cap bytes before HTML parse (httpx may already have loaded body).
+        raw = resp.content[:MAX_RESPONSE_BYTES]
+        try:
+            text = raw.decode(resp.encoding or "utf-8", errors="replace")
+        except (LookupError, TypeError):
+            text = raw.decode("utf-8", errors="replace")
+        return _html_to_text(text)
     return ""
 
 
@@ -85,9 +99,12 @@ def _pinned_fetch_text(
     expected_domain: str,
     attempts: int = 2,
     timeout: float = 8.0,
+    deadline: float | None = None,
 ) -> str:
     last_text = ""
     for i in range(max(1, attempts)):
+        if _deadline_exceeded(deadline):
+            return last_text
         status, _final, body = pinned_https_get(
             url,
             expected_domain=expected_domain,
@@ -105,14 +122,21 @@ def _pinned_fetch_text(
 
 
 def _firecrawl_fetch(
-    client: httpx.Client,
     url: str,
     api_key: str,
     *,
     expected_domain: str,
     attempts: int = 2,
+    deadline: float | None = None,
 ) -> str:
-    """Call Firecrawl scrape API (cloud fetch — one host check + one DNS gate)."""
+    """
+    Call Firecrawl scrape API via a dedicated client (no page-fetch proxy).
+
+    Local host/DNS checks are advisory only — Firecrawl re-resolves the URL
+    out-of-process (separate trust boundary / TOCTOU).
+    """
+    if _deadline_exceeded(deadline):
+        return ""
     host = check_url_host(url, expected_domain=expected_domain)
     if host is None or resolve_public_ip(host) is None:
         logger.debug("Blocked unsafe URL before Firecrawl: %s", url)
@@ -120,17 +144,18 @@ def _firecrawl_fetch(
 
     endpoint = "https://api.firecrawl.dev/v1/scrape"
     try:
-        resp = request_with_retries(
-            client,
-            "POST",
-            endpoint,
-            attempts=attempts,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"url": url, "formats": ["markdown"]},
-        )
+        with httpx.Client(timeout=8.0, follow_redirects=False) as api_client:
+            resp = request_with_retries(
+                api_client,
+                "POST",
+                endpoint,
+                attempts=attempts,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"url": url, "formats": ["markdown"]},
+            )
         if resp.status_code != 200:
             logger.debug("Firecrawl status %s for %s", resp.status_code, url)
             return ""
@@ -152,6 +177,8 @@ def read_domain_evidence(
     max_pages: int = 4,
     max_fetch_attempts: int = 2,
     http_client: httpx.Client | None = None,
+    deadline: float | None = None,
+    allow_firecrawl: bool = True,
 ) -> PageEvidence:
     domain = hit.domain or extract_domain(hit.url if hit.url else "")
     if not domain:
@@ -175,6 +202,10 @@ def read_domain_evidence(
     try:
         paths = deep_paths[: max(1, max_pages)]
         for path in paths:
+            if _deadline_exceeded(deadline):
+                logger.debug("Deep-read deadline hit mid-domain domain=%s", domain)
+                break
+
             if path == "/" and hit.url.startswith("http"):
                 raw = hit.url
                 url = "https://" + raw[len("http://") :] if raw.startswith("http://") else raw
@@ -187,13 +218,13 @@ def read_domain_evidence(
                 continue
 
             text = ""
-            if firecrawl_api_key:
+            if allow_firecrawl and firecrawl_api_key:
                 text = _firecrawl_fetch(
-                    client,
                     url,
                     firecrawl_api_key,
                     expected_domain=domain,
                     attempts=max_fetch_attempts,
+                    deadline=deadline,
                 )
             if not text:
                 try:
@@ -203,12 +234,14 @@ def read_domain_evidence(
                             url,
                             expected_domain=domain,
                             attempts=max_fetch_attempts,
+                            deadline=deadline,
                         )
                     else:
                         text = _pinned_fetch_text(
                             url,
                             expected_domain=domain,
                             attempts=max_fetch_attempts,
+                            deadline=deadline,
                         )
                 except Exception as e:  # noqa: BLE001
                     logger.debug("deep-read failed %s: %s", url, e)
@@ -236,12 +269,17 @@ def read_domain_evidence(
             client.close()
 
     has_any = bool(extracted) and bool(pages)
-    confidence = profile.score_confidence(
-        pages,
-        pages_with_hints=pages_with_hints,
-        has_any_hint=has_any,
-        contributing_excerpt_len=contributing_excerpt_len,
-    )
+    confidence = None
+    if pages:
+        try:
+            confidence = profile.score_confidence(
+                pages,
+                pages_with_hints=pages_with_hints,
+                has_any_hint=has_any,
+                contributing_excerpt_len=contributing_excerpt_len,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("score_confidence failed domain=%s: %s", domain, e)
 
     return PageEvidence(
         domain=domain,
@@ -261,6 +299,7 @@ def deep_read_hits(
     proxy: str | None = None,
     max_fetch_attempts: int = 2,
     max_deep_read_seconds: float = 25.0,
+    allow_firecrawl: bool = True,
 ) -> list[SearchHit]:
     enriched: list[SearchHit] = []
     deadline = time.monotonic() + max(0.0, max_deep_read_seconds)
@@ -268,7 +307,7 @@ def deep_read_hits(
     try:
         for i, hit in enumerate(hits):
             if i < max_deep_read:
-                if time.monotonic() >= deadline:
+                if _deadline_exceeded(deadline):
                     logger.debug("Deep-read wall clock budget exhausted after %s domains", i)
                     enriched.extend(hits[i:])
                     break
@@ -279,6 +318,8 @@ def deep_read_hits(
                     proxy=proxy,
                     max_fetch_attempts=max_fetch_attempts,
                     http_client=client,
+                    deadline=deadline,
+                    allow_firecrawl=allow_firecrawl,
                 )
                 if evidence.pages:
                     hit = hit.model_copy(update={"page_evidence": evidence})
