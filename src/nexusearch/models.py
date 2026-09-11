@@ -29,6 +29,8 @@ class SearchHit(BaseModel):
     domain: str = ""
     discovery_query: str = ""
     iteration: int = 1
+    source_adapter: str = ""
+    channel: str = "serp"
     page_evidence: PageEvidence | None = None
 
 

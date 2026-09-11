@@ -1,6 +1,6 @@
 """Extra discovery adapter tests."""
 
-from nexusearch.discovery import is_allowed_domain, search_tavily
+from nexusearch.discovery import TavilyAdapter, is_allowed_domain
 
 
 def test_is_allowed_seen_blocks():
@@ -11,6 +11,6 @@ def test_tavily_without_key(monkeypatch):
     import nexusearch.discovery as disc
 
     monkeypatch.setattr(disc, "TavilyClient", object)
-    hits, used = search_tavily("q", api_key=None)
+    hits, used = TavilyAdapter(api_key=None).discover("q")
     assert hits == []
     assert used is False

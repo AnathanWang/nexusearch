@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from nexusearch.config import NexusSearchSettings
-from nexusearch.discovery import discover_for_queries
+from nexusearch.discovery import DiscoveryAdapter, discover_for_queries
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import NexusSearchOptions, SearchBundle, SearchMeta
 from nexusearch.page_reader import deep_read_hits
@@ -21,6 +22,7 @@ class NexusSearchClient:
     Multi-iteration live web discovery + optional deep page reading.
 
     Domain behavior comes exclusively from the required SearchProfile.
+    Discovery backends are pluggable DiscoveryAdapters.
     """
 
     def __init__(
@@ -31,6 +33,7 @@ class NexusSearchClient:
         firecrawl_api_key: str | None = None,
         proxy_url: str | None = None,
         llm: LlmJsonClient | None = None,
+        adapters: Sequence[DiscoveryAdapter] | None = None,
     ) -> None:
         if profile is None:
             raise TypeError("NexusSearchClient requires a SearchProfile")
@@ -39,6 +42,7 @@ class NexusSearchClient:
         self.firecrawl_api_key = firecrawl_api_key
         self.proxy_url = proxy_url
         self.llm = llm
+        self.adapters = adapters
 
     @classmethod
     def from_env(
@@ -47,6 +51,7 @@ class NexusSearchClient:
         profile: SearchProfile,
         llm: LlmJsonClient | None = None,
         settings: NexusSearchSettings | None = None,
+        adapters: Sequence[DiscoveryAdapter] | None = None,
     ) -> NexusSearchClient:
         s = settings or NexusSearchSettings.from_env()
         return cls(
@@ -55,6 +60,7 @@ class NexusSearchClient:
             firecrawl_api_key=s.firecrawl_api_key,
             proxy_url=s.proxy_url,
             llm=llm,
+            adapters=adapters,
         )
 
     def search(self, query: str, options: NexusSearchOptions | None = None) -> SearchBundle:
@@ -74,6 +80,7 @@ class NexusSearchClient:
         queries_used.extend(iter1)
         hits, eng1, hit1 = discover_for_queries(
             iter1,
+            adapters=self.adapters,
             tavily_api_key=self.tavily_api_key,
             proxy=proxy,
             iteration=1,
@@ -99,6 +106,7 @@ class NexusSearchClient:
                 queries_used.extend(iter2)
                 hits, eng2, hit2 = discover_for_queries(
                     iter2,
+                    adapters=self.adapters,
                     tavily_api_key=self.tavily_api_key,
                     proxy=proxy,
                     iteration=2,

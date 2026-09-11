@@ -1,4 +1,4 @@
-"""Live discovery adapters: Tavily (primary) + DuckDuckGo (secondary)."""
+"""Discovery adapters (engines / channels) and their merge orchestration."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -29,6 +30,8 @@ try:
 except ImportError:
     TavilyClient = None
 
+
+# --- domain utils -----------------------------------------------------------
 
 def extract_domain(url: str) -> str:
     try:
@@ -82,60 +85,92 @@ def merge_hits(
     return out
 
 
-def search_tavily(
-    query: str,
-    *,
-    api_key: str | None,
-    max_results: int = 10,
-    iteration: int = 1,
-    attempts: int = 3,
-) -> tuple[list[SearchHit], bool]:
-    """Returns (hits, engine_used). engine_used only after a successful API response."""
-    if not api_key or TavilyClient is None:
-        return [], False
+# --- Adapter protocol -------------------------------------------------------
 
-    last_err: Exception | None = None
-    search_res: dict | None = None
-    for i in range(max(1, attempts)):
-        try:
-            client = TavilyClient(api_key=api_key)
-            search_res = client.search(
-                query=query,
-                search_depth="advanced",
-                max_results=max_results,
-                include_domains=[],
+@runtime_checkable
+class DiscoveryAdapter(Protocol):
+    """One discovery backend (SERP engine, grounded LLM, expo, directory…)."""
+
+    name: str
+    channel: str
+
+    def discover(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        iteration: int,
+        ignored_domains: Sequence[str] = (),
+    ) -> tuple[list[SearchHit], bool]:
+        """Return (hits, attempted_ok). attempted_ok only after a successful response."""
+        ...
+
+
+# --- Built-in adapters ------------------------------------------------------
+
+class TavilyAdapter:
+    name = "tavily"
+    channel = "serp"
+
+    def __init__(self, api_key: str | None, *, attempts: int = 3) -> None:
+        self.api_key = api_key
+        self.attempts = attempts
+
+    def discover(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        iteration: int = 1,
+        ignored_domains: Sequence[str] = (),
+    ) -> tuple[list[SearchHit], bool]:
+        if not self.api_key or TavilyClient is None:
+            return [], False
+
+        last_err: Exception | None = None
+        search_res: dict | None = None
+        for i in range(max(1, self.attempts)):
+            try:
+                client = TavilyClient(api_key=self.api_key)
+                search_res = client.search(
+                    query=query,
+                    search_depth="advanced",
+                    max_results=max_results,
+                    include_domains=[],
+                )
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if i >= self.attempts - 1:
+                    logger.warning("Tavily search failed for '%s': %s", query, e)
+                    return [], False
+                delay = 0.35 * (2**i)
+                logger.debug("Tavily retry %s/%s: %s", i + 1, self.attempts, e)
+                time.sleep(delay)
+
+        if not isinstance(search_res, dict):
+            logger.warning("Tavily search failed for '%s': %s", query, last_err)
+            return [], False
+
+        hits: list[SearchHit] = []
+        for item in search_res.get("results", []):
+            url = item.get("url", "") or ""
+            domain = extract_domain(url)
+            if not domain:
+                continue
+            hits.append(
+                SearchHit(
+                    title=item.get("title", "") or "",
+                    url=url,
+                    snippet=item.get("content", "") or "",
+                    domain=domain,
+                    discovery_query=query,
+                    iteration=iteration,
+                    source_adapter=self.name,
+                    channel=self.channel,
+                )
             )
-            break
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if i >= attempts - 1:
-                logger.warning("Tavily search failed for '%s': %s", query, e)
-                return [], False
-            delay = 0.35 * (2**i)
-            logger.debug("Tavily retry %s/%s: %s", i + 1, attempts, e)
-            time.sleep(delay)
-
-    if not isinstance(search_res, dict):
-        logger.warning("Tavily search failed for '%s': %s", query, last_err)
-        return [], False
-
-    hits: list[SearchHit] = []
-    for item in search_res.get("results", []):
-        url = item.get("url", "") or ""
-        domain = extract_domain(url)
-        if not domain:
-            continue
-        hits.append(
-            SearchHit(
-                title=item.get("title", "") or "",
-                url=url,
-                snippet=item.get("content", "") or "",
-                domain=domain,
-                discovery_query=query,
-                iteration=iteration,
-            )
-        )
-    return hits, True
+        return hits, True
 
 
 def _parse_ddg_html_items(html_text: str) -> list[dict[str, str]]:
@@ -162,142 +197,163 @@ def _parse_ddg_html_items(html_text: str) -> list[dict[str, str]]:
     return items
 
 
-def search_ddg(
-    query: str,
-    *,
-    max_results: int = 10,
-    proxy: str | None = None,
-    iteration: int = 1,
-    ignored_domains: Sequence[str] = (),
-) -> tuple[list[SearchHit], bool]:
-    hits: list[SearchHit] = []
-    seen: set[str] = set()
-    used = False
+class DuckDuckGoAdapter:
+    name = "ddg"
+    channel = "serp"
 
-    if DDGS is not None:
-        try:
-            with DDGS(proxy=proxy) if proxy else DDGS() as ddgs:
-                try:
-                    items = list(ddgs.text(query, max_results=max_results + 2))
-                    used = True
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("DDGS text error for '%s': %s", query, e)
-                    items = []
-                for item in items:
-                    url = item.get("href") or item.get("link") or ""
-                    if not url.startswith("http"):
-                        continue
-                    domain = extract_domain(url)
-                    if not is_allowed_domain(domain, seen, ignored_domains):
-                        continue
-                    seen.add(domain)
-                    hits.append(
-                        SearchHit(
-                            title=item.get("title", "") or "",
-                            url=url,
-                            snippet=item.get("body", "") or "",
-                            domain=domain,
-                            discovery_query=query,
-                            iteration=iteration,
+    def __init__(self, proxy: str | None = None) -> None:
+        self.proxy = proxy
+
+    def discover(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        iteration: int = 1,
+        ignored_domains: Sequence[str] = (),
+    ) -> tuple[list[SearchHit], bool]:
+        hits: list[SearchHit] = []
+        seen: set[str] = set()
+        used = False
+
+        if DDGS is not None:
+            try:
+                with DDGS(proxy=self.proxy) if self.proxy else DDGS() as ddgs:
+                    try:
+                        items = list(ddgs.text(query, max_results=max_results + 2))
+                        used = True
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("DDGS text error for '%s': %s", query, e)
+                        items = []
+                    for item in items:
+                        url = item.get("href") or item.get("link") or ""
+                        if not url.startswith("http"):
+                            continue
+                        domain = extract_domain(url)
+                        if not is_allowed_domain(domain, seen, ignored_domains):
+                            continue
+                        seen.add(domain)
+                        hits.append(
+                            SearchHit(
+                                title=item.get("title", "") or "",
+                                url=url,
+                                snippet=item.get("body", "") or "",
+                                domain=domain,
+                                discovery_query=query,
+                                iteration=iteration,
+                                source_adapter=self.name,
+                                channel=self.channel,
+                            )
                         )
-                    )
-                    if len(hits) >= max_results:
-                        return hits, used
-        except Exception as e:  # noqa: BLE001
-            logger.warning("DDGS session failed: %s", e)
+                        if len(hits) >= max_results:
+                            return hits, used
+            except Exception as e:  # noqa: BLE001
+                logger.warning("DDGS session failed: %s", e)
 
-    if len(hits) >= max_results:
+        if len(hits) >= max_results:
+            return hits, used
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        try:
+            with httpx.Client(proxy=self.proxy, timeout=8.0, follow_redirects=True) as client:
+                resp = request_with_retries(
+                    client,
+                    "GET",
+                    "https://html.duckduckgo.com/html/",
+                    attempts=3,
+                    params={"q": query},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    used = True
+                    for item in _parse_ddg_html_items(resp.text):
+                        domain = extract_domain(item["url"])
+                        if not is_allowed_domain(domain, seen, ignored_domains):
+                            continue
+                        seen.add(domain)
+                        hits.append(
+                            SearchHit(
+                                title=item["title"],
+                                url=item["url"],
+                                snippet=item["snippet"],
+                                domain=domain,
+                                discovery_query=query,
+                                iteration=iteration,
+                                source_adapter=self.name,
+                                channel=self.channel,
+                            )
+                        )
+                        if len(hits) >= max_results:
+                            break
+        except Exception as e:  # noqa: BLE001
+            logger.debug("DDG HTML fallback failed for '%s': %s", query, e)
+
         return hits, used
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        with httpx.Client(proxy=proxy, timeout=8.0, follow_redirects=True) as client:
-            resp = request_with_retries(
-                client,
-                "GET",
-                "https://html.duckduckgo.com/html/",
-                attempts=3,
-                params={"q": query},
-                headers=headers,
-            )
-            if resp.status_code == 200:
-                used = True
-                for item in _parse_ddg_html_items(resp.text):
-                    domain = extract_domain(item["url"])
-                    if not is_allowed_domain(domain, seen, ignored_domains):
-                        continue
-                    seen.add(domain)
-                    hits.append(
-                        SearchHit(
-                            title=item["title"],
-                            url=item["url"],
-                            snippet=item["snippet"],
-                            domain=domain,
-                            discovery_query=query,
-                            iteration=iteration,
-                        )
-                    )
-                    if len(hits) >= max_results:
-                        break
-    except Exception as e:  # noqa: BLE001
-        logger.debug("DDG HTML fallback failed for '%s': %s", query, e)
 
-    return hits, used
+def default_adapters(
+    *,
+    tavily_api_key: str | None = None,
+    proxy: str | None = None,
+) -> list[DiscoveryAdapter]:
+    adapters: list[DiscoveryAdapter] = []
+    if tavily_api_key and TavilyClient is not None:
+        adapters.append(TavilyAdapter(tavily_api_key))
+    adapters.append(DuckDuckGoAdapter(proxy=proxy))
+    return adapters
 
+
+# --- Orchestration ----------------------------------------------------------
 
 def discover_for_queries(
     queries: list[str],
     *,
-    tavily_api_key: str | None,
-    proxy: str | None,
+    adapters: Sequence[DiscoveryAdapter] | None = None,
+    tavily_api_key: str | None = None,
+    proxy: str | None = None,
     iteration: int,
     max_hits: int,
     ignored_domains: Sequence[str] = (),
     existing: list[SearchHit] | None = None,
 ) -> tuple[list[SearchHit], list[str], list[str]]:
     """
-    Run discovery for each query.
+    Run discovery for each query over adapters (first fills, rest fill gaps).
 
-    Returns (hits, engines_attempted, engines_with_hits).
+    Returns (hits, adapters_attempted, adapters_with_hits).
     """
     hits = list(existing or [])
     engines: list[str] = []
     engines_with_hits: list[str] = []
     per_query = max(3, max_hits // max(len(queries), 1) + 2)
+    active: Sequence[DiscoveryAdapter] = adapters if adapters is not None else default_adapters(
+        tavily_api_key=tavily_api_key,
+        proxy=proxy,
+    )
 
     for q in queries:
         if len(hits) >= max_hits:
             break
-        needed = max_hits - len(hits)
-        before = len(hits)
-        t_hits, t_used = search_tavily(
-            q, api_key=tavily_api_key, max_results=min(per_query, needed), iteration=iteration
-        )
-        if t_used and "tavily" not in engines:
-            engines.append("tavily")
-        hits = merge_hits(hits, t_hits, max_hits=max_hits, ignored_domains=ignored_domains)
-        if len(hits) > before and "tavily" not in engines_with_hits:
-            engines_with_hits.append("tavily")
-        if len(hits) >= max_hits:
-            break
-        before = len(hits)
-        d_hits, d_used = search_ddg(
-            q,
-            max_results=min(per_query, max_hits - len(hits)),
-            proxy=proxy,
-            iteration=iteration,
-            ignored_domains=ignored_domains,
-        )
-        if d_used and "ddg" not in engines:
-            engines.append("ddg")
-        hits = merge_hits(hits, d_hits, max_hits=max_hits, ignored_domains=ignored_domains)
-        if len(hits) > before and "ddg" not in engines_with_hits:
-            engines_with_hits.append("ddg")
+        for adapter in active:
+            if len(hits) >= max_hits:
+                break
+            needed = max_hits - len(hits)
+            before = len(hits)
+            a_hits, used = adapter.discover(
+                q,
+                max_results=min(per_query, needed),
+                iteration=iteration,
+                ignored_domains=ignored_domains,
+            )
+            if used and adapter.name not in engines:
+                engines.append(adapter.name)
+            hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+            if len(hits) > before and adapter.name not in engines_with_hits:
+                engines_with_hits.append(adapter.name)
 
     return hits, engines, engines_with_hits
