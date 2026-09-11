@@ -54,6 +54,36 @@ class ExpoProfile:
     channels = ("expo", "serp")
 ```
 
+## Свой канал discovery (custom adapter)
+
+Доменные каналы (expo, directories, sitemap…) живут **в потребителе**, не в
+ядре. Достаточно реализовать протокол:
+
+```python
+class ExpoAdapter:  # живёт в вашем репо, не в nexusearch
+    name = "expo"
+    channel = "expo"
+
+    def __init__(self, backend):  # backend — любой SERP-адаптер
+        self.backend = backend
+
+    def discover(self, query, *, max_results=10, iteration=1, ignored_domains=()):
+        raw, used = self.backend.discover(
+            f"{query} trade show exhibitors list",
+            max_results=max_results * 3, iteration=iteration,
+            ignored_domains=ignored_domains,
+        )
+        hits = [h.model_copy(update={"channel": "expo", "source_adapter": "expo"})
+                for h in raw if self._is_expo(h.url, h.domain)]
+        return hits[:max_results], used
+
+client = NexusSearchClient(profile=ExpoProfile(), adapters=[*default_adapters(), ExpoAdapter(DuckDuckGoAdapter())])
+```
+
+Контракт: `discover` возвращает `(hits, attempted_ok)`; адаптер обязан быть
+reentrant (вызывается из пула потоков при `parallel_adapters=True`); падение
+адаптера изолировано ядром (логируется, деградирует в `([], False)`).
+
 ## Кэш и бюджеты
 
 ```python

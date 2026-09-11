@@ -1,6 +1,5 @@
 """Universal multi-iteration web search (profile-driven, no domain defaults)."""
 
-from nexusearch.adapters_expo import ExpoAdapter
 from nexusearch.adapters_llm import LlmGroundedAdapter
 from nexusearch.async_client import AsyncNexusSearchClient
 from nexusearch.client import NexusSearchClient
@@ -33,7 +32,6 @@ __all__ = [
     "Budget",
     "DiscoveryAdapter",
     "DuckDuckGoAdapter",
-    "ExpoAdapter",
     "HintConfidence",
     "HookPipeline",
     "LlmGroundedAdapter",
@@ -55,4 +53,4 @@ __all__ = [
     "emit_hooks_sync",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

@@ -5,7 +5,6 @@ import math
 
 import pytest
 
-from nexusearch.adapters_expo import ExpoAdapter
 from nexusearch.adapters_llm import LlmGroundedAdapter, _extract_candidates
 from nexusearch.async_client import AsyncNexusSearchClient
 from nexusearch.client import NexusSearchClient
@@ -117,36 +116,6 @@ def test_llm_www_dedupes_with_serp():
 
     hits, _ = LlmGroundedAdapter(_L()).discover("q")
     assert hits[0].domain == "acme.com"
-
-
-# --- #7 expo path segments ----------------------------------------------------
-
-class _Backend:
-    name = "b"
-    channel = "serp"
-
-    def __init__(self, urls):
-        self._urls = urls
-
-    def discover(self, q, **kw):
-        from nexusearch.discovery import extract_domain
-
-        return [SearchHit(url=u, domain=extract_domain(u)) for u in self._urls], True
-
-
-def test_expo_path_boundaries():
-    backend = _Backend([
-        "https://a.example/fair-trade-coffee",
-        "https://b.example/blog/exponential-growth",
-        "https://c.example/exposure-tips",
-        "https://d.example/exhibitors",
-        "https://e.example/expo-2027",
-    ])
-    hits, _ = ExpoAdapter(backend=backend).discover("coffee", max_results=10)
-    urls = [h.url for h in hits]
-    assert "https://d.example/exhibitors" in urls
-    assert "https://e.example/expo-2027" in urls
-    assert not any("fair-trade" in u or "exponential" in u or "exposure" in u for u in urls)
 
 
 # --- #9/#10 cache edges --------------------------------------------------------
