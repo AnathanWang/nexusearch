@@ -1,5 +1,7 @@
 """Universal multi-iteration web search (profile-driven, no domain defaults)."""
 
+from nexusearch.adapters_llm import LlmGroundedAdapter
+from nexusearch.adapters_llm import LlmGroundedAdapter
 from nexusearch.async_client import AsyncNexusSearchClient, SearchHooks
 from nexusearch.client import NexusSearchClient
 from nexusearch.config import NexusSearchSettings
@@ -29,6 +31,7 @@ __all__ = [
     "DiscoveryAdapter",
     "DuckDuckGoAdapter",
     "HintConfidence",
+    "LlmGroundedAdapter",
     "LlmJsonClient",
     "NexusSearchClient",
     "NexusSearchOptions",

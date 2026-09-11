@@ -15,6 +15,7 @@ class SearchProfile(Protocol):
     name: str
     ignored_domains: Sequence[str]
     deep_paths: Sequence[str]
+    channels: Sequence[str] = ("serp",)
 
     def plan_iter1(
         self,

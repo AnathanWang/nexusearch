@@ -77,6 +77,30 @@ def test_search_hit_provenance_defaults():
     assert h.channel == "serp"
 
 
+def test_profile_channels_filter_adapters():
+    class _LlmCh:
+        name = "llm_ch"
+        channel = "llm_grounded"
+
+        def __init__(self):
+            self.calls = 0
+
+        def discover(self, query, *, max_results=10, iteration=1, ignored_domains=()):
+            self.calls += 1
+            return [], True
+
+    stub = _StubAdapter()
+    llm_ch = _LlmCh()
+
+    class _SerpOnlyProfile(_Profile):
+        channels = ("serp",)
+
+    client = NexusSearchClient(profile=_SerpOnlyProfile(), adapters=[stub, llm_ch])
+    client.search("q", NexusSearchOptions(deep_read=False))
+    assert stub.calls, "serp adapter must run"
+    assert llm_ch.calls == 0, "llm_grounded adapter must be filtered out by profile channels"
+
+
 def test_parallel_discover_merges_all_adapters():
     from nexusearch.discovery import discover_for_queries
 

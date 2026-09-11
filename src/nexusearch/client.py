@@ -46,7 +46,17 @@ class NexusSearchClient:
         self.serpapi_api_key = serpapi_api_key
         self.proxy_url = proxy_url
         self.llm = llm
-        self.adapters = adapters
+        self.adapters = self._filter_adapters(adapters)
+
+    def _filter_adapters(
+        self, adapters: Sequence[DiscoveryAdapter] | None
+    ) -> Sequence[DiscoveryAdapter] | None:
+        if adapters is None:
+            return None
+        channels = tuple(getattr(self.profile, "channels", ()) or ())
+        if not channels:
+            return adapters
+        return [a for a in adapters if getattr(a, "channel", "serp") in channels]
 
     @classmethod
     def from_env(

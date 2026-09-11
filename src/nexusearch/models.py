@@ -31,6 +31,7 @@ class SearchHit(BaseModel):
     iteration: int = 1
     source_adapter: str = ""
     channel: str = "serp"
+    grounding_score: float | None = None
     page_evidence: PageEvidence | None = None
 
 
