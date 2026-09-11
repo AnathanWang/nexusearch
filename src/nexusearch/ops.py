@@ -14,6 +14,10 @@ class SearchCache:
     """Thread-safe TTL cache keyed by (profile, query, options-digest)."""
 
     def __init__(self, ttl_seconds: float = 900.0, max_entries: int = 256) -> None:
+        if max_entries < 1:
+            raise ValueError("max_entries must be >= 1")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be > 0")
         self.ttl = ttl_seconds
         self.max_entries = max_entries
         self._lock = threading.Lock()
@@ -37,7 +41,7 @@ class SearchCache:
 
     def set(self, key: str, bundle: SearchBundle) -> None:
         with self._lock:
-            if len(self._store) >= self.max_entries:
+            if key not in self._store and len(self._store) >= self.max_entries:
                 oldest = min(self._store.items(), key=lambda kv: kv[1][0])[0]
                 self._store.pop(oldest, None)
             self._store[key] = (time.monotonic(), bundle)
@@ -45,10 +49,14 @@ class SearchCache:
 
 @dataclass
 class Budget:
-    """Simple wall-clock budget guard for a search run."""
+    """Simple wall-clock budget guard for a search run (0/negative rejected)."""
 
     max_seconds: float = 60.0
     _started: float = field(default_factory=time.monotonic)
+
+    def __post_init__(self) -> None:
+        if self.max_seconds <= 0:
+            raise ValueError("max_seconds must be > 0")
 
     @property
     def elapsed(self) -> float:

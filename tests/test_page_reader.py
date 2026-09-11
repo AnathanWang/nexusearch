@@ -140,7 +140,6 @@ def test_deadline_skips_remaining_paths(monkeypatch):
     hit = SearchHit(title="V", url="https://vendor.example/", domain="vendor.example")
     profile = HintProfile()
     profile.deep_paths = ("/", "/about", "/dealer", "/wholesale")  # type: ignore[misc]
-    deadline = 5.0  # already exceeded after first path bumps clock... start at 0, first path ok
     # Start deadline at 15 so first path (0→10) ok, second (10→20) blocked at start of loop when t>=15
     clock["t"] = 0.0
     ev = read_domain_evidence(

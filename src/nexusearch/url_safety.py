@@ -292,7 +292,7 @@ def pinned_https_get(
             if conn is not None:
                 try:
                     conn.close()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S110
                     pass
 
     return 0, current, ""

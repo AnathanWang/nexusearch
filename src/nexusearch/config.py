@@ -1,4 +1,8 @@
-"""Optional settings helpers for nexusearch."""
+"""Optional settings helpers for nexusearch.
+
+Proxy env precedence: NEXUSEARCH_PROXY_URL, then legacy fallbacks
+DEEP_SEARCH_PROXY_URL / S3_SCOUT_PROXY_URL (deprecated; will be dropped in 0.3.0).
+"""
 
 from __future__ import annotations
 

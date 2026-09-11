@@ -2,7 +2,7 @@
 
 from nexusearch.adapters_expo import ExpoAdapter
 from nexusearch.adapters_llm import LlmGroundedAdapter
-from nexusearch.async_client import AsyncNexusSearchClient, SearchHooks
+from nexusearch.async_client import AsyncNexusSearchClient
 from nexusearch.client import NexusSearchClient
 from nexusearch.config import NexusSearchSettings
 from nexusearch.discovery import (
@@ -13,6 +13,7 @@ from nexusearch.discovery import (
     TavilyAdapter,
     default_adapters,
 )
+from nexusearch.hooks import HookPipeline, SearchHooks, emit_hooks_sync
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import (
     HintConfidence,
@@ -34,6 +35,7 @@ __all__ = [
     "DuckDuckGoAdapter",
     "ExpoAdapter",
     "HintConfidence",
+    "HookPipeline",
     "LlmGroundedAdapter",
     "LlmJsonClient",
     "NexusSearchClient",
@@ -50,6 +52,7 @@ __all__ = [
     "SerpApiAdapter",
     "TavilyAdapter",
     "default_adapters",
+    "emit_hooks_sync",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

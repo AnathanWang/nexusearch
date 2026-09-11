@@ -3,7 +3,6 @@
 from nexusearch.client import NexusSearchClient
 from nexusearch.discovery import DiscoveryAdapter
 from nexusearch.models import NexusSearchOptions, SearchBundle, SearchHit
-from nexusearch.profile import SearchProfile
 
 
 class _StubAdapter:

@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 HintConfidence = Literal["LOW", "MEDIUM", "HIGH"]
 
 
-class PageSnippet(BaseModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PageSnippet(_StrictModel):
     url: str
     text_excerpt: str = ""
 
 
-class PageEvidence(BaseModel):
+class PageEvidence(_StrictModel):
     domain: str
     pages: list[PageSnippet] = Field(default_factory=list)
     extracted: dict[str, Any] = Field(default_factory=dict)
@@ -22,7 +26,7 @@ class PageEvidence(BaseModel):
     hint_confidence: HintConfidence | None = None
 
 
-class SearchHit(BaseModel):
+class SearchHit(_StrictModel):
     title: str = ""
     url: str = ""
     snippet: str = ""
@@ -35,7 +39,7 @@ class SearchHit(BaseModel):
     page_evidence: PageEvidence | None = None
 
 
-class SearchMeta(BaseModel):
+class SearchMeta(_StrictModel):
     iterations_run: int = 0
     queries_used: list[str] = Field(default_factory=list)
     engines: list[str] = Field(default_factory=list)
@@ -44,8 +48,9 @@ class SearchMeta(BaseModel):
     message: str | None = None
 
 
-class NexusSearchOptions(BaseModel):
+class NexusSearchOptions(_StrictModel):
     max_hits: int = 20
+    deep_read: bool = True
     max_deep_read: int = 10
     enable_iter2: bool = True
     max_iter1_queries: int = 5
@@ -58,6 +63,6 @@ class NexusSearchOptions(BaseModel):
     parallel_adapters: bool = False
 
 
-class SearchBundle(BaseModel):
+class SearchBundle(_StrictModel):
     hits: list[SearchHit] = Field(default_factory=list)
     meta: SearchMeta = Field(default_factory=SearchMeta)

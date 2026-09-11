@@ -1,8 +1,8 @@
-"""Async facade + hooks middleware.
+"""Async facade.
 
 AsyncNexusSearchClient runs the sync pipeline in a worker thread (built-in
-adapters are sync) while exposing an async API; hooks let callers observe and
-intercept pipeline stages without subclassing.
+adapters are sync) while exposing an async API; hooks let callers observe
+pipeline stages (see nexusearch.hooks.SearchHooks).
 """
 
 from __future__ import annotations
@@ -11,49 +11,18 @@ import asyncio
 import logging
 import time
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
 
 from nexusearch.client import NexusSearchClient
 from nexusearch.config import NexusSearchSettings
 from nexusearch.discovery import DiscoveryAdapter
+from nexusearch.hooks import HookPipeline, SearchHooks
 from nexusearch.llm_protocol import LlmJsonClient
-from nexusearch.models import NexusSearchOptions, SearchBundle, SearchHit
+from nexusearch.models import NexusSearchOptions, SearchBundle
 from nexusearch.profile import SearchProfile
 
 logger = logging.getLogger(__name__)
 
-
-@runtime_checkable
-class SearchHooks(Protocol):
-    """Optional middleware callbacks around pipeline stages (sync or async)."""
-
-    def on_search_start(self, query: str, options: NexusSearchOptions) -> None: ...
-    def on_queries_planned(self, queries: list[str], *, iteration: int) -> None: ...
-    def on_hit_discovered(self, hit: SearchHit) -> None: ...
-    def on_search_end(self, bundle: SearchBundle, *, elapsed_ms: float) -> None: ...
-
-
-async def _maybe_await(value):  # noqa: ANN001, ANN202
-    if asyncio.iscoroutine(value):
-        return await value
-    return value
-
-
-class HookPipeline:
-    """Best-effort hook dispatch; hook errors are logged, never raised."""
-
-    def __init__(self, hooks: Sequence[SearchHooks] = ()) -> None:
-        self.hooks = list(hooks)
-
-    async def emit(self, method: str, *args, **kwargs) -> None:
-        for hook in self.hooks:
-            fn = getattr(hook, method, None)
-            if fn is None:
-                continue
-            try:
-                await _maybe_await(fn(*args, **kwargs))
-            except Exception:  # noqa: BLE001
-                logger.exception("Search hook %s.%s failed", type(hook).__name__, method)
+__all__ = ["AsyncNexusSearchClient", "SearchHooks"]
 
 
 class AsyncNexusSearchClient:
@@ -65,6 +34,8 @@ class AsyncNexusSearchClient:
         profile: SearchProfile,
         tavily_api_key: str | None = None,
         firecrawl_api_key: str | None = None,
+        brave_api_key: str | None = None,
+        serpapi_api_key: str | None = None,
         proxy_url: str | None = None,
         llm: LlmJsonClient | None = None,
         adapters: Sequence[DiscoveryAdapter] | None = None,
@@ -74,9 +45,12 @@ class AsyncNexusSearchClient:
             profile=profile,
             tavily_api_key=tavily_api_key,
             firecrawl_api_key=firecrawl_api_key,
+            brave_api_key=brave_api_key,
+            serpapi_api_key=serpapi_api_key,
             proxy_url=proxy_url,
             llm=llm,
             adapters=adapters,
+            hooks=hooks,
         )
         self._hooks = HookPipeline(hooks)
 
@@ -95,6 +69,8 @@ class AsyncNexusSearchClient:
             profile=profile,
             tavily_api_key=s.tavily_api_key,
             firecrawl_api_key=s.firecrawl_api_key,
+            brave_api_key=s.brave_api_key,
+            serpapi_api_key=s.serpapi_api_key,
             proxy_url=s.proxy_url,
             llm=llm,
             adapters=adapters,
@@ -105,7 +81,12 @@ class AsyncNexusSearchClient:
         opts = options or NexusSearchOptions()
         started = time.perf_counter()
         await self._hooks.emit("on_search_start", query, opts)
-        bundle = await asyncio.to_thread(self._sync.search, query, opts)
+        try:
+            bundle = await asyncio.to_thread(self._sync.search, query, opts)
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            await self._hooks.emit("on_search_error", e, elapsed_ms=elapsed_ms)
+            raise
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         for hit in bundle.hits:
             await self._hooks.emit("on_hit_discovered", hit)

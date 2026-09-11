@@ -4,8 +4,7 @@ import asyncio
 
 from nexusearch.async_client import AsyncNexusSearchClient
 from nexusearch.models import NexusSearchOptions, SearchHit
-
-from test_adapters import _Profile, _StubAdapter
+from tests.test_adapters import _Profile, _StubAdapter
 
 
 class _Recorder:

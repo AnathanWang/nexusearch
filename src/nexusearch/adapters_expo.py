@@ -10,6 +10,7 @@ not invented here.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
@@ -36,7 +37,11 @@ DEFAULT_EXPO_DOMAINS: tuple[str, ...] = (
     "exponet.ru",
 )
 
-_EXPO_PATH_HINTS = ("exhibitor", "expo", "trade-show", "tradeshow", "fair", "messe", "vystavka")
+_EXPO_PATH_RE = re.compile(
+    # Segment-boundary match; bare "fair" excluded (fair-trade false positives).
+    r"(?:^|[/._-])(expos?|exhibitors?|trade-shows?|tradeshows?|messe|vystavka)(?:[/._-]|$)",
+    re.IGNORECASE,
+)
 
 
 class ExpoAdapter:
@@ -59,7 +64,7 @@ class ExpoAdapter:
         if any(domain == d or domain.endswith("." + d) for d in self.expo_domains):
             return True
         path = urlsplit(url).path.lower()
-        return any(hint in path for hint in _EXPO_PATH_HINTS)
+        return bool(_EXPO_PATH_RE.search(path))
 
     def discover(
         self,

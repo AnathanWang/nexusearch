@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+import threading
+from collections import deque
 from collections.abc import Callable, Sequence
 
-from nexusearch.discovery import extract_domain
+from nexusearch.discovery import matches_ignored
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import SearchHit
 from nexusearch.url_safety import check_url_host
@@ -56,11 +59,23 @@ class LlmGroundedAdapter:
         *,
         name: str = "llm_grounded",
         prompt_factory: PromptFactory = default_grounded_prompt,
+        max_discarded: int = 500,
     ) -> None:
         self.llm = llm
         self.name = name
         self.prompt_factory = prompt_factory
-        self.discarded_entities: list[dict] = []
+        self._discarded: deque[dict] = deque(maxlen=max_discarded)
+        self._lock = threading.Lock()
+
+    @property
+    def discarded_entities(self) -> list[dict]:
+        """Snapshot of recently discarded candidates (thread-safe, bounded)."""
+        with self._lock:
+            return list(self._discarded)
+
+    def _discard(self, entry: dict) -> None:
+        with self._lock:
+            self._discarded.append(entry)
 
     def discover(
         self,
@@ -87,14 +102,14 @@ class LlmGroundedAdapter:
             name = str(cand.get("name") or "").strip()
             why = str(cand.get("why") or "").strip()
             host = check_url_host(url) if url else None
+            if host is not None:
+                host = host.removeprefix("www.")
             if host is None:
                 if name or url:
-                    self.discarded_entities.append({"name": name, "url": url, "reason": "no_valid_https_url"})
+                    self._discard({"name": name, "url": url, "query": query, "reason": "no_valid_https_url"})
                 continue
-            from nexusearch.discovery import _matches_ignored  # local util
-
-            if any(_matches_ignored(host, ign) for ign in ignored_domains):
-                self.discarded_entities.append({"name": name, "url": url, "reason": "ignored_domain"})
+            if any(matches_ignored(host, ign) for ign in ignored_domains):
+                self._discard({"name": name, "url": url, "query": query, "reason": "ignored_domain"})
                 continue
             if host in seen:
                 continue
@@ -104,6 +119,11 @@ class LlmGroundedAdapter:
                 conf_val = float(conf) if conf is not None else None
             except (TypeError, ValueError):
                 conf_val = None
+            if conf_val is not None:
+                if not math.isfinite(conf_val):
+                    conf_val = None
+                else:
+                    conf_val = max(0.0, min(1.0, conf_val))
             hits.append(
                 SearchHit(
                     title=name or host,
@@ -122,7 +142,7 @@ class LlmGroundedAdapter:
         return hits, True
 
 
-def _extract_candidates(data) -> list[dict]:  # noqa: ANN001
+def _extract_candidates(data) -> list[dict]:
     if isinstance(data, dict):
         raw = data.get("candidates")
         if isinstance(raw, list):
@@ -131,7 +151,11 @@ def _extract_candidates(data) -> list[dict]:  # noqa: ANN001
     if isinstance(data, list):
         return [c for c in data if isinstance(c, dict)]
     if isinstance(data, str):
-        m = re.search(r"\{.*\}", data, re.S)
+        try:
+            return _extract_candidates(json.loads(data))
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r"\[.*\]|\{.*\}", data, re.DOTALL)
         if m:
             try:
                 return _extract_candidates(json.loads(m.group(0)))

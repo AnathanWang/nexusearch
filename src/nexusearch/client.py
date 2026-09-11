@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from nexusearch.config import NexusSearchSettings
 from nexusearch.discovery import DiscoveryAdapter, discover_for_queries
+from nexusearch.hooks import emit_hooks_sync
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import NexusSearchOptions, SearchBundle, SearchMeta
 from nexusearch.page_reader import deep_read_hits
@@ -36,6 +37,7 @@ class NexusSearchClient:
         proxy_url: str | None = None,
         llm: LlmJsonClient | None = None,
         adapters: Sequence[DiscoveryAdapter] | None = None,
+        hooks: Sequence = (),
     ) -> None:
         if profile is None:
             raise TypeError("NexusSearchClient requires a SearchProfile")
@@ -47,13 +49,14 @@ class NexusSearchClient:
         self.proxy_url = proxy_url
         self.llm = llm
         self.adapters = self._filter_adapters(adapters)
+        self._hooks = tuple(hooks)
 
     def _filter_adapters(
         self, adapters: Sequence[DiscoveryAdapter] | None
     ) -> Sequence[DiscoveryAdapter] | None:
         if adapters is None:
             return None
-        channels = tuple(getattr(self.profile, "channels", ()) or ())
+        channels = tuple(getattr(self.profile, "channels", ("serp",)) or ())
         if not channels:
             return adapters
         return [a for a in adapters if getattr(a, "channel", "serp") in channels]
@@ -83,6 +86,16 @@ class NexusSearchClient:
         opts = options or NexusSearchOptions()
         proxy = opts.proxy_url or self.proxy_url
         ignored = tuple(self.profile.ignored_domains)
+        adapters = self.adapters
+        if adapters is None:
+            from nexusearch.discovery import default_adapters
+
+            adapters = self._filter_adapters(default_adapters(
+                tavily_api_key=self.tavily_api_key,
+                brave_api_key=self.brave_api_key,
+                serpapi_api_key=self.serpapi_api_key,
+                proxy=proxy,
+            ))
         queries_used: list[str] = []
         engines: list[str] = []
         engines_with_hits: list[str] = []
@@ -94,9 +107,10 @@ class NexusSearchClient:
             max_queries=opts.max_iter1_queries,
         )
         queries_used.extend(iter1)
+        emit_hooks_sync(self._hooks, "on_queries_planned", list(iter1), iteration=1)
         hits, eng1, hit1 = discover_for_queries(
             iter1,
-            adapters=self.adapters,
+            adapters=adapters,
             tavily_api_key=self.tavily_api_key,
             brave_api_key=self.brave_api_key,
             serpapi_api_key=self.serpapi_api_key,
@@ -114,7 +128,7 @@ class NexusSearchClient:
                 engines_with_hits.append(e)
         iterations_run = 1
 
-        if opts.enable_iter2 and hits:
+        if opts.enable_iter2 and hits and len(hits) < opts.max_hits:
             iter2 = self.profile.plan_iter2(
                 hits,
                 already_used=queries_used,
@@ -122,10 +136,11 @@ class NexusSearchClient:
                 max_queries=opts.max_iter2_queries,
             )
             if iter2:
+                emit_hooks_sync(self._hooks, "on_queries_planned", list(iter2), iteration=2)
                 queries_used.extend(iter2)
                 hits, eng2, hit2 = discover_for_queries(
                     iter2,
-                    adapters=self.adapters,
+                    adapters=adapters,
                     tavily_api_key=self.tavily_api_key,
                     brave_api_key=self.brave_api_key,
                     serpapi_api_key=self.serpapi_api_key,
@@ -147,7 +162,7 @@ class NexusSearchClient:
         hits = hits[: opts.max_hits]
 
         deep_read_count = 0
-        if hits and opts.max_deep_read > 0:
+        if hits and opts.deep_read and opts.max_deep_read > 0:
             deep_budget = min(opts.max_deep_read, opts.max_domains_before_deep_read, len(hits))
             fc_key = self.firecrawl_api_key if opts.allow_firecrawl else None
             hits = deep_read_hits(

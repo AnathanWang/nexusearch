@@ -37,12 +37,12 @@ def extract_domain(url: str) -> str:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname or parsed.path.split("/")[0]
-        return (host or "").replace("www.", "").lower().strip()
+        return (host or "").removeprefix("www.").lower().strip()
     except (ValueError, AttributeError):
-        return url.split("//")[-1].split("/")[0].replace("www.", "").lower().strip()
+        return url.split("//")[-1].split("/")[0].removeprefix("www.").lower().strip()
 
 
-def _matches_ignored(domain: str, ign: str) -> bool:
+def matches_ignored(domain: str, ign: str) -> bool:
     """
     Match ignored patterns without substring false positives.
     - Trailing '.' (e.g. 'amazon.') → prefix / label match (amazon.com, amazon.co.uk)
@@ -63,7 +63,7 @@ def is_allowed_domain(
 ) -> bool:
     if not domain or domain in seen:
         return False
-    return not any(_matches_ignored(domain, ign) for ign in ignored)
+    return not any(matches_ignored(domain, ign) for ign in ignored)
 
 
 def merge_hits(
@@ -76,12 +76,12 @@ def merge_hits(
     seen = {h.domain for h in existing if h.domain}
     out = list(existing)
     for h in new_hits:
+        if len(out) >= max_hits:
+            break
         if not h.domain or not is_allowed_domain(h.domain, seen, ignored_domains):
             continue
         seen.add(h.domain)
         out.append(h)
-        if len(out) >= max_hits:
-            break
     return out
 
 
@@ -153,8 +153,13 @@ class TavilyAdapter:
             return [], False
 
         hits: list[SearchHit] = []
-        for item in search_res.get("results", []):
+        results = search_res.get("results") or []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
             url = item.get("url", "") or ""
+            if not url.startswith("http"):
+                continue
             domain = extract_domain(url)
             if not domain:
                 continue
@@ -186,8 +191,20 @@ def _parse_ddg_html_items(html_text: str) -> list[dict[str, str]]:
         if isinstance(raw_href, str) and "uddg=" in raw_href:
             match = re.search(r"uddg=([^&]+)", raw_href)
             if match:
-                target_url = unquote(match.group(1))
+                # Unquote until stable: DDG sometimes double-encodes targets.
+                prev = match.group(1)
+                for _ in range(3):
+                    decoded = unquote(prev)
+                    if decoded == prev:
+                        break
+                    prev = decoded
+                target_url = prev
         if not isinstance(target_url, str) or not target_url.startswith("http"):
+            continue
+        try:
+            if not urlsplit(target_url).hostname:
+                continue
+        except ValueError:
             continue
         items.append({
             "title": t_el.get_text(strip=True),
@@ -330,7 +347,8 @@ class BraveAdapter:
                     "GET",
                     "https://api.search.brave.com/res/v1/web/search",
                     attempts=3,
-                    params={"q": query, "count": max_results},
+                    # Brave caps `count` at 20 per request.
+                    params={"q": query, "count": min(max_results, 20)},
                     headers=headers,
                 )
                 if resp.status_code != 200:
@@ -343,6 +361,8 @@ class BraveAdapter:
 
         hits: list[SearchHit] = []
         for item in (data.get("web") or {}).get("results", []):
+            if not isinstance(item, dict):
+                continue
             url = item.get("url", "") or ""
             if not url.startswith("http"):
                 continue
@@ -365,7 +385,11 @@ class BraveAdapter:
 
 
 class SerpApiAdapter:
-    """SerpAPI Google adapter (SERPAPI_API_KEY)."""
+    """SerpAPI Google adapter (SERPAPI_API_KEY).
+
+    Note: SerpAPI requires the key in the query string; httpx logs full request
+    URLs at INFO, so we pin the httpx logger to WARNING to avoid key leakage.
+    """
 
     name = "serpapi"
     channel = "serp"
@@ -374,6 +398,7 @@ class SerpApiAdapter:
         self.api_key = api_key
         self.timeout = timeout
         self.proxy = proxy
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
     def discover(
         self,
@@ -406,6 +431,8 @@ class SerpApiAdapter:
 
         hits: list[SearchHit] = []
         for item in data.get("organic_results", []):
+            if not isinstance(item, dict):
+                continue
             url = item.get("link", "") or ""
             if not url.startswith("http"):
                 continue
@@ -480,31 +507,39 @@ def discover_for_queries(
         proxy=proxy,
     )
 
-    def _note_engine(name: str, got_hits: bool) -> None:
-        if name not in engines:
-            engines.append(name)
-        if got_hits and name not in engines_with_hits:
-            engines_with_hits.append(name)
+    def _call_adapter(adapter: DiscoveryAdapter, q: str, limit: int) -> tuple[str, list[SearchHit], bool]:
+        """Isolated adapter call: a crashing adapter degrades to ([], False)."""
+        try:
+            a_hits, used = adapter.discover(
+                q, max_results=limit, iteration=iteration, ignored_domains=ignored_domains
+            )
+        except Exception:
+            logger.exception("Discovery adapter %s crashed on query %r", adapter.name, q)
+            return adapter.name, [], False
+        return adapter.name, a_hits, used
 
     if parallel and len(active) > 1:
         from concurrent.futures import ThreadPoolExecutor
 
-        for q in queries:
-            if len(hits) >= max_hits:
-                break
-            needed = max_hits - len(hits)
-            limit = min(per_query, needed)
-            with ThreadPoolExecutor(max_workers=len(active)) as pool:
+        with ThreadPoolExecutor(max_workers=len(active)) as pool:
+            for q in queries:
+                if len(hits) >= max_hits:
+                    break
+                needed = max_hits - len(hits)
+                limit = min(per_query, needed)
                 results = list(pool.map(
-                    lambda a: (a.name, a.discover(
-                        q, max_results=limit, iteration=iteration, ignored_domains=ignored_domains
-                    )),
+                    lambda a, q=q, limit=limit: _call_adapter(a, q, limit),
                     active,
                 ))
-            for name, (a_hits, used) in results:
-                if used:
-                    _note_engine(name, bool(a_hits))
-                hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+                for name, a_hits, used in results:
+                    if len(hits) >= max_hits:
+                        break
+                    if used and name not in engines:
+                        engines.append(name)
+                    before = len(hits)
+                    hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+                    if len(hits) > before and name not in engines_with_hits:
+                        engines_with_hits.append(name)
         return hits, engines, engines_with_hits
 
     for q in queries:
@@ -515,12 +550,7 @@ def discover_for_queries(
                 break
             needed = max_hits - len(hits)
             before = len(hits)
-            a_hits, used = adapter.discover(
-                q,
-                max_results=min(per_query, needed),
-                iteration=iteration,
-                ignored_domains=ignored_domains,
-            )
+            _name, a_hits, used = _call_adapter(adapter, q, min(per_query, needed))
             if used and adapter.name not in engines:
                 engines.append(adapter.name)
             hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)

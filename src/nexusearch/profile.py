@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence, runtime_checkable
+from collections.abc import Sequence
+from typing import Any, Protocol, runtime_checkable
 
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import HintConfidence, PageSnippet, SearchHit
