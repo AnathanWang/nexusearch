@@ -23,11 +23,13 @@ from nexusearch.models import (
     SearchHit,
     SearchMeta,
 )
+from nexusearch.ops import Budget, SearchCache
 from nexusearch.profile import SearchProfile
 
 __all__ = [
     "AsyncNexusSearchClient",
     "BraveAdapter",
+    "Budget",
     "DiscoveryAdapter",
     "DuckDuckGoAdapter",
     "ExpoAdapter",
@@ -40,6 +42,7 @@ __all__ = [
     "PageEvidence",
     "PageSnippet",
     "SearchBundle",
+    "SearchCache",
     "SearchHit",
     "SearchHooks",
     "SearchMeta",
@@ -49,4 +52,4 @@ __all__ = [
     "default_adapters",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
