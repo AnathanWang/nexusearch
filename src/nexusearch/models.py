@@ -24,6 +24,9 @@ class PageEvidence(_StrictModel):
     extracted: dict[str, Any] = Field(default_factory=dict)
     sources: dict[str, str] = Field(default_factory=dict)
     hint_confidence: HintConfidence | None = None
+    # True when the profile's content policy (stop/required words) disqualified
+    # the domain after fetching its pages; such hits are dropped from results.
+    rejected: bool = False
 
 
 class SearchHit(_StrictModel):
@@ -45,6 +48,10 @@ class SearchMeta(_StrictModel):
     engines: list[str] = Field(default_factory=list)
     engines_with_hits: list[str] = Field(default_factory=list)
     deep_read_count: int = 0
+    # Name of the SearchProfile that produced this bundle.
+    profile: str = ""
+    # Hits dropped by the profile's content policy during deep-read.
+    rejected_count: int = 0
     message: str | None = None
 
 

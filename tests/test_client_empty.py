@@ -63,7 +63,7 @@ def test_deep_read_count(monkeypatch):
                 hint_confidence="MEDIUM",
             )
             enriched.append(h.model_copy(update={"page_evidence": ev}))
-        return enriched
+        return enriched, 0
 
     monkeypatch.setattr(client_mod, "discover_for_queries", fake_discover)
     monkeypatch.setattr(client_mod, "deep_read_hits", fake_deep)

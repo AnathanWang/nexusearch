@@ -184,8 +184,15 @@ def read_domain_evidence(
     if not domain:
         return PageEvidence(domain="")
 
+    # Optional content-policy hooks (duck-typed, fail-open):
+    #   reject_page(text, *, url) -> bool        — red flags, checked per page
+    #   accept_domain(texts, *, domain) -> bool  — green flags, checked at the end
+    reject_page = getattr(profile, "reject_page", None)
+    accept_domain = getattr(profile, "accept_domain", None)
+
     root = f"https://{domain}"
     pages: list[PageSnippet] = []
+    full_texts: list[str] = []
     pages_with_hints = 0
     contributing_excerpt_len = 0
     extracted: dict[str, Any] = {}
@@ -250,6 +257,15 @@ def read_domain_evidence(
             if not text:
                 continue
 
+            if reject_page is not None:
+                try:
+                    if reject_page(text, url=url):
+                        logger.info("Deep-read rejected domain=%s url=%s (page policy)", domain, url)
+                        return PageEvidence(domain=domain, rejected=True)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("reject_page hook failed domain=%s: %s", domain, e)
+
+            full_texts.append(text)
             excerpt = text[:4000]
             pages.append(PageSnippet(url=url, text_excerpt=excerpt))
             hints = profile.extract_hints(text, url=url)
@@ -281,12 +297,24 @@ def read_domain_evidence(
         except Exception as e:  # noqa: BLE001
             logger.warning("score_confidence failed domain=%s: %s", domain, e)
 
+    # Green-flag policy runs on FULL page texts (not truncated excerpts) to
+    # avoid false rejections when a required word appears past the excerpt cap.
+    rejected = False
+    if pages and accept_domain is not None:
+        try:
+            if not accept_domain(full_texts, domain=domain):
+                logger.info("Deep-read rejected domain=%s (domain policy)", domain)
+                rejected = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("accept_domain hook failed domain=%s: %s", domain, e)
+
     return PageEvidence(
         domain=domain,
         pages=pages,
         extracted=extracted if pages else {},
         sources=sources if pages else {},
         hint_confidence=confidence if pages else None,
+        rejected=rejected,
     )
 
 
@@ -300,8 +328,16 @@ def deep_read_hits(
     max_fetch_attempts: int = 2,
     max_deep_read_seconds: float = 25.0,
     allow_firecrawl: bool = True,
-) -> list[SearchHit]:
+) -> tuple[list[SearchHit], int]:
+    """Deep-read hits; returns (enriched_hits, rejected_count).
+
+    Hits whose domain was disqualified by the profile's content policy
+    (reject_page / accept_domain hooks) are DROPPED from the result and
+    counted in rejected_count. Hits whose pages could not be fetched are
+    kept as-is (validation is best-effort on fetched content only).
+    """
     enriched: list[SearchHit] = []
+    rejected_count = 0
     deadline = time.monotonic() + max(0.0, max_deep_read_seconds)
     client = httpx.Client(proxy=proxy, timeout=8.0, follow_redirects=False)
     try:
@@ -321,9 +357,12 @@ def deep_read_hits(
                     deadline=deadline,
                     allow_firecrawl=allow_firecrawl,
                 )
+                if evidence.rejected:
+                    rejected_count += 1
+                    continue
                 if evidence.pages:
                     hit = hit.model_copy(update={"page_evidence": evidence})
             enriched.append(hit)
     finally:
         client.close()
-    return enriched
+    return enriched, rejected_count

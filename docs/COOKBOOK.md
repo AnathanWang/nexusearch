@@ -54,6 +54,122 @@ class ExpoProfile:
     channels = ("expo", "serp")
 ```
 
+## Ориентировка: сценарий поиска без классов (SimpleSearchProfile)
+
+Библиотека — умный, но слепой агент. `SimpleSearchProfile` — это «ориентировка»,
+которую разработчик передаёт агенту одним конфигом:
+
+```python
+from nexusearch import NexusSearchClient, SimpleSearchProfile
+from nexusearch.hints import EMAIL_PATTERN, PHONE_PATTERN
+
+horeca = SimpleSearchProfile(
+    name="horeca_b2b",
+    description="HoReCa B2B suppliers (оптовики продуктов для ресторанов)",
+
+    # Словарь: одно слово юзера → несколько прокачанных запросов
+    query_templates=[
+        "{query} HoReCa опт поставка",
+        "{query} оптовый поставщик прайс-лист",
+        "{query} дистрибьютор продуктов для ресторанов",
+    ],
+    iter2_template='"{brand}" прайс опт',   # докрутка по найденным брендам
+
+    # География
+    ignored_domains=["eda.ru", "delivery-club.", "avito.", "ozon.", "wildberries."],
+    # allowed_domains=["b2b-center.ru", "supl.biz"],  # whitelist-режим (опц.)
+    # url_path_patterns=[r"/(wholesale|opt|b2b)"],     # только такие URL (опц.)
+
+    # Детектор мусора (применяется к скачанным страницам в deep-read)
+    stop_words=["рецепт", "как приготовить", "калорийность", "положить в корзину"],
+    required_words=["прайс", "отгрузка"],  # хотя бы одно обязано быть на домене
+
+    # Извлечение фактов
+    hint_patterns={"email": EMAIL_PATTERN, "phone": PHONE_PATTERN},
+
+    deep_paths=("/", "/about", "/price", "/opt"),
+)
+
+client = NexusSearchClient(profile=horeca, tavily_api_key="...")
+bundle = client.search("мраморная говядина")
+for hit in bundle.hits:
+    print(hit.url, hit.page_evidence.extracted if hit.page_evidence else {})
+print(bundle.meta.rejected_count, "сайтов забраковано")  # детектор мусора
+```
+
+Как работает детектор мусора:
+
+- `stop_words` (красные флаги): любое слово на скачанной странице → домен
+  бракуется немедленно, остальные страницы домена не скачиваются.
+- `required_words` (зелёные флаги): если заданы, хотя бы одно слово должно
+  встретиться в объединённом полном тексте всех страниц домена.
+- Забракованные хиты **удаляются** из результатов; счётчик — `meta.rejected_count`.
+- Валидация best-effort: работает только на реально скачанных страницах
+  (`deep_read=True`). Сайт, который не удалось скачать, остаётся без evidence,
+  но НЕ бракуется.
+
+Ограничение: `SimpleSearchProfile` планирует запросы детерминированно (только
+шаблоны). Нужен LLM-планning — реализуйте полный протокол `SearchProfile`.
+
+## Свой канал декларативно (DomainChannelAdapter)
+
+Канал discovery (выставки, каталоги, отраслевые площадки) без написания класса:
+
+```python
+from nexusearch import DomainChannelAdapter, NexusSearchClient, default_adapters
+
+expo = DomainChannelAdapter(
+    name="expo",
+    query_templates=["{query} trade show exhibitors list"],
+    allowed_domains=["10times.com", "expocentr.ru"],           # exact/subdomain
+    path_patterns=[r"(?:^|[/._-])(expos?|exhibitors?)(?:[/._-]|$)"],
+    # backend=DuckDuckGoAdapter() по умолчанию; можно передать любой SERP-адаптер
+)
+
+profile = SimpleSearchProfile(
+    name="expo",
+    channels=("expo", "serp"),   # профиль решает, какие каналы активны
+    query_templates=["{query} trade show exhibitors list", "{query} expo exhibition"],
+)
+client = NexusSearchClient(profile=profile, adapters=[*default_adapters(), expo])
+```
+
+Хит попадает в канал, если его домен в `allowed_domains` ИЛИ путь URL матчит
+`path_patterns`. Provenance проставляется автоматически (`source_adapter`,
+`channel`, `discovery_query`).
+
+## Мульти-сценарий: авто-выбор по запросу (роутинг)
+
+Несколько сценариев + гибридный роутер (правила → LLM → default):
+
+```python
+from nexusearch import (
+    DomainChannelAdapter, HybridRouter, RoutedSearchClient, RouteRule,
+    SimpleSearchProfile, default_adapters,
+)
+
+router = HybridRouter(
+    rules=[RouteRule("expo", r"выставк|expo|trade.?show")],
+    default="supplier",
+)
+client = RoutedSearchClient(
+    profiles={"supplier": supplier_profile, "expo": expo_profile},
+    router=router,
+    llm=my_llm,                      # опционально; без него — только правила
+    adapters=[*default_adapters(), expo_adapter],
+    tavily_api_key="...",
+)
+bundle = client.search("выставка кемпингового снаряжения")
+bundle.meta.profile  # "expo" — какой сценарий сработал
+```
+
+- Правила — case-insensitive regex, первое совпадение выигрывает.
+- Если ни одно правило не сработало и передан `llm` — LLM классифицирует
+  запрос по именам и `description` сценариев; мусорный/неизвестный ответ →
+  default.
+- Каждый сценарий получает свой `NexusSearchClient` со своей фильтрацией
+  каналов: expo-адаптер не вызывается для supplier-запросов и наоборот.
+
 ## Свой канал discovery (custom adapter)
 
 Доменные каналы (expo, directories, sitemap…) живут **в потребителе**, не в

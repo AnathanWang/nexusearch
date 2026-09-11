@@ -64,7 +64,8 @@ def test_deep_read_hits_skips_empty_evidence(monkeypatch):
 
     monkeypatch.setattr(pr, "read_domain_evidence", fake_read)
     hits = [SearchHit(title="A", url="https://a.example", domain="a.example")]
-    out = deep_read_hits(hits, profile=HintProfile(), max_deep_read=1)
+    out, rejected = deep_read_hits(hits, profile=HintProfile(), max_deep_read=1)
+    assert rejected == 0
     assert out[0].page_evidence is None
 
 
@@ -94,7 +95,8 @@ def test_deep_read_budget_stops_early(monkeypatch):
         SearchHit(title="B", url="https://b.example", domain="b.example"),
         SearchHit(title="C", url="https://c.example", domain="c.example"),
     ]
-    out = deep_read_hits(hits, profile=HintProfile(), max_deep_read=3, max_deep_read_seconds=15.0)
+    out, rejected = deep_read_hits(hits, profile=HintProfile(), max_deep_read=3, max_deep_read_seconds=15.0)
+    assert rejected == 0
     assert calls["n"] == 2
     assert out[0].page_evidence is not None
     assert out[1].page_evidence is not None

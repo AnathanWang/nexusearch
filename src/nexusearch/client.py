@@ -3,19 +3,68 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
+from urllib.parse import urlsplit
 
 from nexusearch.config import NexusSearchSettings
-from nexusearch.discovery import DiscoveryAdapter, discover_for_queries
+from nexusearch.discovery import (
+    DiscoveryAdapter,
+    discover_for_queries,
+    extract_domain,
+    matches_ignored,
+)
 from nexusearch.hooks import emit_hooks_sync
 from nexusearch.llm_protocol import LlmJsonClient
-from nexusearch.models import NexusSearchOptions, SearchBundle, SearchMeta
+from nexusearch.models import NexusSearchOptions, SearchBundle, SearchHit, SearchMeta
 from nexusearch.page_reader import deep_read_hits
 from nexusearch.profile import SearchProfile
 
 logger = logging.getLogger(__name__)
 
 _EMPTY_MSG = "No live search hits found."
+
+
+def _apply_profile_geo_filter(hits: list[SearchHit], profile: SearchProfile) -> list[SearchHit]:
+    """Hard geo filter from optional profile attrs (duck-typed, both opt-in):
+
+    - allowed_domains: keep only exact/subdomain matches (whitelist mode)
+    - url_path_patterns: keep only hits whose URL path matches any pattern
+
+    Note: url_path_patterns on raw SERP hits is strict (a homepage has no
+    /wholesale in its path); the softer alternative is profile.deep_paths.
+    """
+    allowed = tuple(getattr(profile, "allowed_domains", ()) or ())
+    patterns = tuple(getattr(profile, "url_path_patterns", ()) or ())
+    if not allowed and not patterns:
+        return hits
+    compiled: list[re.Pattern[str]] = []
+    for p in patterns:
+        try:
+            compiled.append(re.compile(p, re.IGNORECASE))
+        except re.error:
+            logger.warning("Skipping invalid url_path_pattern %r", p)
+    out: list[SearchHit] = []
+    for h in hits:
+        domain = (h.domain or extract_domain(h.url)).lower()
+        if allowed and not any(matches_ignored(domain, a) for a in allowed):
+            continue
+        if compiled:
+            try:
+                path = urlsplit(h.url).path.lower()
+            except ValueError:
+                continue
+            if not any(rx.search(path) for rx in compiled):
+                continue
+        out.append(h)
+    dropped = len(hits) - len(out)
+    if dropped:
+        logger.info(
+            "Profile geo filter dropped %s hits (profile=%s)",
+            dropped,
+            getattr(profile, "name", "?"),
+        )
+    return out
 
 
 class NexusSearchClient:
@@ -160,12 +209,14 @@ class NexusSearchClient:
                 iterations_run = 2
 
         hits = hits[: opts.max_hits]
+        hits = _apply_profile_geo_filter(hits, self.profile)
 
         deep_read_count = 0
+        rejected_count = 0
         if hits and opts.deep_read and opts.max_deep_read > 0:
             deep_budget = min(opts.max_deep_read, opts.max_domains_before_deep_read, len(hits))
             fc_key = self.firecrawl_api_key if opts.allow_firecrawl else None
-            hits = deep_read_hits(
+            hits, rejected_count = deep_read_hits(
                 hits,
                 profile=self.profile,
                 max_deep_read=deep_budget,
@@ -196,6 +247,8 @@ class NexusSearchClient:
             engines=engines,
             engines_with_hits=engines_with_hits,
             deep_read_count=deep_read_count,
+            profile=getattr(self.profile, "name", "") or "",
+            rejected_count=rejected_count,
             message=message,
         )
         return SearchBundle(hits=hits, meta=meta)
