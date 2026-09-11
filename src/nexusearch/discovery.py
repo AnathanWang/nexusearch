@@ -297,14 +297,150 @@ class DuckDuckGoAdapter:
         return hits, used
 
 
+class BraveAdapter:
+    """Brave Search API adapter (BRAVE_API_KEY)."""
+
+    name = "brave"
+    channel = "serp"
+
+    def __init__(self, api_key: str | None, *, timeout: float = 8.0, proxy: str | None = None) -> None:
+        self.api_key = api_key
+        self.timeout = timeout
+        self.proxy = proxy
+
+    def discover(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        iteration: int = 1,
+        ignored_domains: Sequence[str] = (),
+    ) -> tuple[list[SearchHit], bool]:
+        if not self.api_key:
+            return [], False
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": self.api_key,
+        }
+        try:
+            with httpx.Client(proxy=self.proxy, timeout=self.timeout, follow_redirects=True) as client:
+                resp = request_with_retries(
+                    client,
+                    "GET",
+                    "https://api.search.brave.com/res/v1/web/search",
+                    attempts=3,
+                    params={"q": query, "count": max_results},
+                    headers=headers,
+                )
+                if resp.status_code != 200:
+                    logger.debug("Brave search HTTP %s for '%s'", resp.status_code, query)
+                    return [], False
+                data = resp.json()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Brave search failed for '%s': %s", query, e)
+            return [], False
+
+        hits: list[SearchHit] = []
+        for item in (data.get("web") or {}).get("results", []):
+            url = item.get("url", "") or ""
+            if not url.startswith("http"):
+                continue
+            domain = extract_domain(url)
+            if not domain:
+                continue
+            hits.append(
+                SearchHit(
+                    title=item.get("title", "") or "",
+                    url=url,
+                    snippet=item.get("description", "") or "",
+                    domain=domain,
+                    discovery_query=query,
+                    iteration=iteration,
+                    source_adapter=self.name,
+                    channel=self.channel,
+                )
+            )
+        return hits, True
+
+
+class SerpApiAdapter:
+    """SerpAPI Google adapter (SERPAPI_API_KEY)."""
+
+    name = "serpapi"
+    channel = "serp"
+
+    def __init__(self, api_key: str | None, *, timeout: float = 10.0, proxy: str | None = None) -> None:
+        self.api_key = api_key
+        self.timeout = timeout
+        self.proxy = proxy
+
+    def discover(
+        self,
+        query: str,
+        *,
+        max_results: int = 10,
+        iteration: int = 1,
+        ignored_domains: Sequence[str] = (),
+    ) -> tuple[list[SearchHit], bool]:
+        if not self.api_key:
+            return [], False
+        params = {
+            "engine": "google",
+            "q": query,
+            "num": max_results,
+            "api_key": self.api_key,
+        }
+        try:
+            with httpx.Client(proxy=self.proxy, timeout=self.timeout, follow_redirects=True) as client:
+                resp = request_with_retries(
+                    client, "GET", "https://serpapi.com/search.json", attempts=3, params=params
+                )
+                if resp.status_code != 200:
+                    logger.debug("SerpAPI HTTP %s for '%s'", resp.status_code, query)
+                    return [], False
+                data = resp.json()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SerpAPI search failed for '%s': %s", query, e)
+            return [], False
+
+        hits: list[SearchHit] = []
+        for item in data.get("organic_results", []):
+            url = item.get("link", "") or ""
+            if not url.startswith("http"):
+                continue
+            domain = extract_domain(url)
+            if not domain:
+                continue
+            hits.append(
+                SearchHit(
+                    title=item.get("title", "") or "",
+                    url=url,
+                    snippet=item.get("snippet", "") or "",
+                    domain=domain,
+                    discovery_query=query,
+                    iteration=iteration,
+                    source_adapter=self.name,
+                    channel=self.channel,
+                )
+            )
+        return hits, True
+
+
 def default_adapters(
     *,
     tavily_api_key: str | None = None,
+    brave_api_key: str | None = None,
+    serpapi_api_key: str | None = None,
     proxy: str | None = None,
 ) -> list[DiscoveryAdapter]:
     adapters: list[DiscoveryAdapter] = []
     if tavily_api_key and TavilyClient is not None:
         adapters.append(TavilyAdapter(tavily_api_key))
+    if brave_api_key:
+        adapters.append(BraveAdapter(brave_api_key, proxy=proxy))
+    if serpapi_api_key:
+        adapters.append(SerpApiAdapter(serpapi_api_key, proxy=proxy))
     adapters.append(DuckDuckGoAdapter(proxy=proxy))
     return adapters
 
@@ -316,14 +452,20 @@ def discover_for_queries(
     *,
     adapters: Sequence[DiscoveryAdapter] | None = None,
     tavily_api_key: str | None = None,
+    brave_api_key: str | None = None,
+    serpapi_api_key: str | None = None,
     proxy: str | None = None,
     iteration: int,
     max_hits: int,
     ignored_domains: Sequence[str] = (),
     existing: list[SearchHit] | None = None,
+    parallel: bool = False,
 ) -> tuple[list[SearchHit], list[str], list[str]]:
     """
     Run discovery for each query over adapters (first fills, rest fill gaps).
+
+    With parallel=True, adapters for one query run concurrently in threads and
+    their hits are merged by first-appearance rank across adapters.
 
     Returns (hits, adapters_attempted, adapters_with_hits).
     """
@@ -333,8 +475,37 @@ def discover_for_queries(
     per_query = max(3, max_hits // max(len(queries), 1) + 2)
     active: Sequence[DiscoveryAdapter] = adapters if adapters is not None else default_adapters(
         tavily_api_key=tavily_api_key,
+        brave_api_key=brave_api_key,
+        serpapi_api_key=serpapi_api_key,
         proxy=proxy,
     )
+
+    def _note_engine(name: str, got_hits: bool) -> None:
+        if name not in engines:
+            engines.append(name)
+        if got_hits and name not in engines_with_hits:
+            engines_with_hits.append(name)
+
+    if parallel and len(active) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        for q in queries:
+            if len(hits) >= max_hits:
+                break
+            needed = max_hits - len(hits)
+            limit = min(per_query, needed)
+            with ThreadPoolExecutor(max_workers=len(active)) as pool:
+                results = list(pool.map(
+                    lambda a: (a.name, a.discover(
+                        q, max_results=limit, iteration=iteration, ignored_domains=ignored_domains
+                    )),
+                    active,
+                ))
+            for name, (a_hits, used) in results:
+                if used:
+                    _note_engine(name, bool(a_hits))
+                hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+        return hits, engines, engines_with_hits
 
     for q in queries:
         if len(hits) >= max_hits:

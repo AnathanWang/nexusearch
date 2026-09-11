@@ -31,6 +31,8 @@ class NexusSearchClient:
         profile: SearchProfile,
         tavily_api_key: str | None = None,
         firecrawl_api_key: str | None = None,
+        brave_api_key: str | None = None,
+        serpapi_api_key: str | None = None,
         proxy_url: str | None = None,
         llm: LlmJsonClient | None = None,
         adapters: Sequence[DiscoveryAdapter] | None = None,
@@ -40,6 +42,8 @@ class NexusSearchClient:
         self.profile = profile
         self.tavily_api_key = tavily_api_key
         self.firecrawl_api_key = firecrawl_api_key
+        self.brave_api_key = brave_api_key
+        self.serpapi_api_key = serpapi_api_key
         self.proxy_url = proxy_url
         self.llm = llm
         self.adapters = adapters
@@ -58,6 +62,8 @@ class NexusSearchClient:
             profile=profile,
             tavily_api_key=s.tavily_api_key,
             firecrawl_api_key=s.firecrawl_api_key,
+            brave_api_key=s.brave_api_key,
+            serpapi_api_key=s.serpapi_api_key,
             proxy_url=s.proxy_url,
             llm=llm,
             adapters=adapters,
@@ -82,10 +88,13 @@ class NexusSearchClient:
             iter1,
             adapters=self.adapters,
             tavily_api_key=self.tavily_api_key,
+            brave_api_key=self.brave_api_key,
+            serpapi_api_key=self.serpapi_api_key,
             proxy=proxy,
             iteration=1,
             max_hits=opts.max_hits,
             ignored_domains=ignored,
+            parallel=opts.parallel_adapters,
         )
         for e in eng1:
             if e not in engines:
@@ -108,11 +117,14 @@ class NexusSearchClient:
                     iter2,
                     adapters=self.adapters,
                     tavily_api_key=self.tavily_api_key,
+                    brave_api_key=self.brave_api_key,
+                    serpapi_api_key=self.serpapi_api_key,
                     proxy=proxy,
                     iteration=2,
                     max_hits=opts.max_hits,
                     ignored_domains=ignored,
                     existing=hits,
+                    parallel=opts.parallel_adapters,
                 )
                 for e in eng2:
                     if e not in engines:

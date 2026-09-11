@@ -54,6 +54,7 @@ class NexusSearchOptions(BaseModel):
     max_fetch_attempts: int = 2
     max_deep_read_seconds: float = 25.0
     allow_firecrawl: bool = True
+    parallel_adapters: bool = False
 
 
 class SearchBundle(BaseModel):

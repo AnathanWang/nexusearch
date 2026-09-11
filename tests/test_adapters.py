@@ -75,3 +75,30 @@ def test_search_hit_provenance_defaults():
     h = SearchHit(url="https://x.example/", domain="x.example")
     assert h.source_adapter == ""
     assert h.channel == "serp"
+
+
+def test_parallel_discover_merges_all_adapters():
+    from nexusearch.discovery import discover_for_queries
+
+    class _A:
+        name = "a"
+        channel = "serp"
+
+        def discover(self, query, *, max_results=10, iteration=1, ignored_domains=()):
+            return [SearchHit(url="https://a.example/", domain="a.example",
+                              source_adapter="a", channel="serp")], True
+
+    class _B:
+        name = "b"
+        channel = "serp"
+
+        def discover(self, query, *, max_results=10, iteration=1, ignored_domains=()):
+            return [SearchHit(url="https://b.example/", domain="b.example",
+                              source_adapter="b", channel="serp")], True
+
+    hits, engines, with_hits = discover_for_queries(
+        ["q"], adapters=[_A(), _B()], iteration=1, max_hits=10, parallel=True
+    )
+    assert {h.domain for h in hits} == {"a.example", "b.example"}
+    assert engines == ["a", "b"]
+    assert with_hits == ["a", "b"]

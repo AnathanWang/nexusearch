@@ -10,6 +10,8 @@ from dataclasses import dataclass
 class NexusSearchSettings:
     tavily_api_key: str | None = None
     firecrawl_api_key: str | None = None
+    brave_api_key: str | None = None
+    serpapi_api_key: str | None = None
     proxy_url: str | None = None
 
     @classmethod
@@ -17,6 +19,8 @@ class NexusSearchSettings:
         return cls(
             tavily_api_key=os.getenv("TAVILY_API_KEY") or None,
             firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY") or None,
+            brave_api_key=os.getenv("BRAVE_API_KEY") or None,
+            serpapi_api_key=os.getenv("SERPAPI_API_KEY") or None,
             proxy_url=(
                 os.getenv("NEXUSEARCH_PROXY_URL")
                 or os.getenv("DEEP_SEARCH_PROXY_URL")
