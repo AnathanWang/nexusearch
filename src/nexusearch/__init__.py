@@ -1,6 +1,6 @@
 """Universal multi-iteration web search (profile-driven, no domain defaults)."""
 
-from nexusearch.adapters_llm import LlmGroundedAdapter
+from nexusearch.adapters_expo import ExpoAdapter
 from nexusearch.adapters_llm import LlmGroundedAdapter
 from nexusearch.async_client import AsyncNexusSearchClient, SearchHooks
 from nexusearch.client import NexusSearchClient
@@ -30,6 +30,7 @@ __all__ = [
     "BraveAdapter",
     "DiscoveryAdapter",
     "DuckDuckGoAdapter",
+    "ExpoAdapter",
     "HintConfidence",
     "LlmGroundedAdapter",
     "LlmJsonClient",
