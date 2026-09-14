@@ -1,7 +1,10 @@
 """Optional settings helpers for nexusearch.
 
-Proxy env precedence: NEXUSEARCH_PROXY_URL, then legacy fallbacks
-DEEP_SEARCH_PROXY_URL / S3_SCOUT_PROXY_URL (deprecated; will be dropped in 0.3.0).
+Keys are ALWAYS owned by the consumer project: pass them explicitly to
+NexusSearchClient / AsyncNexusSearchClient / RoutedSearchClient. This helper
+is only a convenience for consumers who keep keys in their own environment;
+the library never reads env vars on its own and knows no consumer-specific
+variable names.
 """
 
 from __future__ import annotations
@@ -20,15 +23,16 @@ class NexusSearchSettings:
 
     @classmethod
     def from_env(cls) -> NexusSearchSettings:
+        """Read provider-standard / nexusearch-generic env names.
+
+        Precedence for proxy: NEXUSEARCH_PROXY_URL only (consumer-specific
+        names like S3_SCOUT_PROXY_URL belong to the consumer's own settings
+        and must be passed explicitly via proxy_url=...).
+        """
         return cls(
             tavily_api_key=os.getenv("TAVILY_API_KEY") or None,
             firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY") or None,
             brave_api_key=os.getenv("BRAVE_API_KEY") or None,
             serpapi_api_key=os.getenv("SERPAPI_API_KEY") or None,
-            proxy_url=(
-                os.getenv("NEXUSEARCH_PROXY_URL")
-                or os.getenv("DEEP_SEARCH_PROXY_URL")
-                or os.getenv("S3_SCOUT_PROXY_URL")
-                or None
-            ),
+            proxy_url=os.getenv("NEXUSEARCH_PROXY_URL") or None,
         )

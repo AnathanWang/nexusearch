@@ -2,6 +2,36 @@
 
 Рецепты по использованию nexusearch.
 
+## Ключи и конфигурация
+
+Ключи всегда принадлежат проекту-потребителю и передаются **явно** — библиотека
+не читает env сама и не знает чужих имён переменных:
+
+```python
+from nexusearch import NexusSearchClient
+
+client = NexusSearchClient(
+    profile=my_profile,
+    tavily_api_key=settings.tavily_api_key,      # из settings ВАШЕГО проекта
+    brave_api_key=settings.brave_api_key,
+    serpapi_api_key=settings.serpapi_api_key,
+    firecrawl_api_key=settings.firecrawl_api_key,
+    proxy_url=settings.my_proxy_url,
+)
+```
+
+Тот же набор ключей принимают `AsyncNexusSearchClient` и `RoutedSearchClient`
+(через `**client_kwargs`).
+
+Опциональный шорткат — `NexusSearchClient.from_env(profile=...)`: читает только
+provider-стандартные имена (`TAVILY_API_KEY`, `BRAVE_API_KEY`, `SERPAPI_API_KEY`,
+`FIRECRAWL_API_KEY`) и `NEXUSEARCH_PROXY_URL`. Если в вашем проекте переменные
+называются иначе (напр. `S3_SCOUT_PROXY_URL`) — читайте их в своих settings и
+передавайте явно.
+
+Адаптеры без ключей просто не активируются: без единого ключа работает
+бесплатный `DuckDuckGoAdapter`.
+
 ## LLM grounded search without invent
 
 `LlmGroundedAdapter` превращает grounded-ответы LLM (Perplexity sonar, OpenAI
