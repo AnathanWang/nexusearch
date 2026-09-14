@@ -13,7 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from nexusearch.circuit import CircuitBreaker
-from nexusearch.http_util import request_with_retries
+from nexusearch.http_util import backoff_delay, request_with_retries
 from nexusearch.models import SearchHit
 from nexusearch.ratelimit import RateLimiter
 
@@ -31,6 +31,14 @@ try:
     from tavily import TavilyClient
 except ImportError:
     TavilyClient = None
+
+_DDG_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 # --- domain utils -----------------------------------------------------------
@@ -87,6 +95,53 @@ def merge_hits(
     return out
 
 
+# --- adapter internals ------------------------------------------------------
+
+def _rate_limit_ok(limiter: RateLimiter | None, adapter_name: str) -> bool:
+    """Shared guard preamble: an exhausted limiter means 'not attempted'."""
+    if limiter is None or limiter.acquire():
+        return True
+    logger.warning("%s rate limit exhausted, skipping call", adapter_name)
+    return False
+
+
+def _record_success(breaker: CircuitBreaker | None) -> None:
+    if breaker is not None:
+        breaker.record_success()
+
+
+def _record_failure(breaker: CircuitBreaker | None) -> None:
+    if breaker is not None:
+        breaker.record_failure()
+
+
+def _make_hit(
+    adapter: DiscoveryAdapter,
+    *,
+    title: str,
+    url: str,
+    snippet: str,
+    query: str,
+    iteration: int,
+) -> SearchHit | None:
+    """Validate a raw SERP result and stamp provenance; None if unusable."""
+    if not url.startswith("http"):
+        return None
+    domain = extract_domain(url)
+    if not domain:
+        return None
+    return SearchHit(
+        title=title,
+        url=url,
+        snippet=snippet,
+        domain=domain,
+        discovery_query=query,
+        iteration=iteration,
+        source_adapter=adapter.name,
+        channel=adapter.channel,
+    )
+
+
 # --- Adapter protocol -------------------------------------------------------
 
 @runtime_checkable
@@ -114,7 +169,14 @@ class TavilyAdapter:
     name = "tavily"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, attempts: int = 3, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        attempts: int = 3,
+        rate_limiter: RateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.api_key = api_key
         self.attempts = attempts
         self.rate_limiter = rate_limiter
@@ -130,9 +192,7 @@ class TavilyAdapter:
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key or TavilyClient is None:
             return [], False
-
-        if self.rate_limiter is not None and not self.rate_limiter.acquire():
-            logger.warning("Tavily rate limit exhausted, skipping call")
+        if not _rate_limit_ok(self.rate_limiter, "Tavily"):
             return [], False
 
         last_err: Exception | None = None
@@ -151,43 +211,30 @@ class TavilyAdapter:
                 last_err = e
                 if i >= self.attempts - 1:
                     logger.warning("Tavily search failed for '%s': %s", query, e)
-                    if self.circuit_breaker is not None:
-                        self.circuit_breaker.record_failure()
+                    _record_failure(self.circuit_breaker)
                     return [], False
-                delay = 0.35 * (2**i)
                 logger.debug("Tavily retry %s/%s: %s", i + 1, self.attempts, e)
-                time.sleep(delay)
+                time.sleep(backoff_delay(i))
 
         if not isinstance(search_res, dict):
             logger.warning("Tavily search failed for '%s': %s", query, last_err)
             return [], False
 
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.record_success()
-
+        _record_success(self.circuit_breaker)
         hits: list[SearchHit] = []
-        results = search_res.get("results") or []
-        for item in results:
+        for item in search_res.get("results") or []:
             if not isinstance(item, dict):
                 continue
-            url = item.get("url", "") or ""
-            if not url.startswith("http"):
-                continue
-            domain = extract_domain(url)
-            if not domain:
-                continue
-            hits.append(
-                SearchHit(
-                    title=item.get("title", "") or "",
-                    url=url,
-                    snippet=item.get("content", "") or "",
-                    domain=domain,
-                    discovery_query=query,
-                    iteration=iteration,
-                    source_adapter=self.name,
-                    channel=self.channel,
-                )
+            hit = _make_hit(
+                self,
+                title=item.get("title", "") or "",
+                url=item.get("url", "") or "",
+                snippet=item.get("content", "") or "",
+                query=query,
+                iteration=iteration,
             )
+            if hit is not None:
+                hits.append(hit)
         return hits, True
 
 
@@ -228,10 +275,17 @@ def _parse_ddg_html_items(html_text: str) -> list[dict[str, str]]:
 
 
 class DuckDuckGoAdapter:
+    """DDG discovery: ddgs library first, HTML scrape as fallback."""
+
     name = "ddg"
     channel = "serp"
 
-    def __init__(self, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
+    def __init__(
+        self,
+        proxy: str | None = None,
+        rate_limiter: RateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.proxy = proxy
         self.rate_limiter = rate_limiter
         self.circuit_breaker = circuit_breaker
@@ -244,59 +298,91 @@ class DuckDuckGoAdapter:
         iteration: int = 1,
         ignored_domains: Sequence[str] = (),
     ) -> tuple[list[SearchHit], bool]:
+        if not _rate_limit_ok(self.rate_limiter, "DDG"):
+            return [], False
         hits: list[SearchHit] = []
         seen: set[str] = set()
-        used = False
+        used = self._via_ddgs(
+            query, hits=hits, seen=seen,
+            max_results=max_results, iteration=iteration, ignored_domains=ignored_domains,
+        )
+        if len(hits) < max_results:
+            used = self._via_html(
+                query, hits=hits, seen=seen,
+                max_results=max_results, iteration=iteration, ignored_domains=ignored_domains,
+            ) or used
+        if used:
+            _record_success(self.circuit_breaker)
+        else:
+            _record_failure(self.circuit_breaker)
+        return hits, used
 
-        # Rate limit check
-        if self.rate_limiter is not None and not self.rate_limiter.acquire():
-            logger.warning("DDG rate limit exhausted, skipping call")
-            return [], False
-
-        if DDGS is not None:
-            try:
-                with DDGS(proxy=self.proxy) if self.proxy else DDGS() as ddgs:
-                    try:
-                        items = list(ddgs.text(query, max_results=max_results + 2))
-                        used = True
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug("DDGS text error for '%s': %s", query, e)
-                        items = []
-                    for item in items:
-                        url = item.get("href") or item.get("link") or ""
-                        if not url.startswith("http"):
-                            continue
-                        domain = extract_domain(url)
-                        if not is_allowed_domain(domain, seen, ignored_domains):
-                            continue
-                        seen.add(domain)
-                        hits.append(
-                            SearchHit(
-                                title=item.get("title", "") or "",
-                                url=url,
-                                snippet=item.get("body", "") or "",
-                                domain=domain,
-                                discovery_query=query,
-                                iteration=iteration,
-                                source_adapter=self.name,
-                                channel=self.channel,
-                            )
-                        )
-                        if len(hits) >= max_results:
-                            return hits, used
-            except Exception as e:  # noqa: BLE001
-                logger.warning("DDGS session failed: %s", e)
-
+    def _append(
+        self,
+        hits: list[SearchHit],
+        seen: set[str],
+        *,
+        title: str,
+        url: str,
+        snippet: str,
+        query: str,
+        iteration: int,
+        max_results: int,
+        ignored_domains: Sequence[str],
+    ) -> None:
         if len(hits) >= max_results:
-            return hits, used
+            return
+        hit = _make_hit(self, title=title, url=url, snippet=snippet, query=query, iteration=iteration)
+        if hit is None or not is_allowed_domain(hit.domain, seen, ignored_domains):
+            return
+        seen.add(hit.domain)
+        hits.append(hit)
 
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+    def _via_ddgs(
+        self,
+        query: str,
+        *,
+        hits: list[SearchHit],
+        seen: set[str],
+        max_results: int,
+        iteration: int,
+        ignored_domains: Sequence[str],
+    ) -> bool:
+        """Library path; True only if the API actually responded."""
+        if DDGS is None:
+            return False
+        try:
+            with DDGS(proxy=self.proxy) if self.proxy else DDGS() as ddgs:
+                try:
+                    items = list(ddgs.text(query, max_results=max_results + 2))
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("DDGS text error for '%s': %s", query, e)
+                    return False
+                for item in items:
+                    self._append(
+                        hits, seen,
+                        title=item.get("title", "") or "",
+                        url=item.get("href") or item.get("link") or "",
+                        snippet=item.get("body", "") or "",
+                        query=query, iteration=iteration,
+                        max_results=max_results, ignored_domains=ignored_domains,
+                    )
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DDGS session failed: %s", e)
+            return False
+
+    def _via_html(
+        self,
+        query: str,
+        *,
+        hits: list[SearchHit],
+        seen: set[str],
+        max_results: int,
+        iteration: int,
+        ignored_domains: Sequence[str],
+    ) -> bool:
+        """Scrape path; True only on an HTTP 200 page."""
         try:
             with httpx.Client(proxy=self.proxy, timeout=8.0, follow_redirects=True) as client:
                 resp = request_with_retries(
@@ -305,39 +391,23 @@ class DuckDuckGoAdapter:
                     "https://html.duckduckgo.com/html/",
                     attempts=3,
                     params={"q": query},
-                    headers=headers,
+                    headers=_DDG_HEADERS,
                 )
-                if resp.status_code == 200:
-                    used = True
-                    for item in _parse_ddg_html_items(resp.text):
-                        domain = extract_domain(item["url"])
-                        if not is_allowed_domain(domain, seen, ignored_domains):
-                            continue
-                        seen.add(domain)
-                        hits.append(
-                            SearchHit(
-                                title=item["title"],
-                                url=item["url"],
-                                snippet=item["snippet"],
-                                domain=domain,
-                                discovery_query=query,
-                                iteration=iteration,
-                                source_adapter=self.name,
-                                channel=self.channel,
-                            )
-                        )
-                        if len(hits) >= max_results:
-                            break
+                if resp.status_code != 200:
+                    return False
+                for item in _parse_ddg_html_items(resp.text):
+                    self._append(
+                        hits, seen,
+                        title=item["title"],
+                        url=item["url"],
+                        snippet=item["snippet"],
+                        query=query, iteration=iteration,
+                        max_results=max_results, ignored_domains=ignored_domains,
+                    )
+                return True
         except Exception as e:  # noqa: BLE001
             logger.debug("DDG HTML fallback failed for '%s': %s", query, e)
-
-        if self.circuit_breaker is not None:
-            if used:
-                self.circuit_breaker.record_success()
-            else:
-                self.circuit_breaker.record_failure()
-
-        return hits, used
+            return False
 
 
 class BraveAdapter:
@@ -346,7 +416,15 @@ class BraveAdapter:
     name = "brave"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, timeout: float = 8.0, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        timeout: float = 8.0,
+        proxy: str | None = None,
+        rate_limiter: RateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.api_key = api_key
         self.timeout = timeout
         self.proxy = proxy
@@ -363,9 +441,7 @@ class BraveAdapter:
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key:
             return [], False
-        
-        if self.rate_limiter is not None and not self.rate_limiter.acquire():
-            logger.warning("Brave rate limit exhausted, skipping call")
+        if not _rate_limit_ok(self.rate_limiter, "Brave"):
             return [], False
 
         headers = {
@@ -390,35 +466,24 @@ class BraveAdapter:
                 data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("Brave search failed for '%s': %s", query, e)
-            if self.circuit_breaker is not None:
-                self.circuit_breaker.record_failure()
+            _record_failure(self.circuit_breaker)
             return [], False
 
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.record_success()
-
+        _record_success(self.circuit_breaker)
         hits: list[SearchHit] = []
         for item in (data.get("web") or {}).get("results", []):
             if not isinstance(item, dict):
                 continue
-            url = item.get("url", "") or ""
-            if not url.startswith("http"):
-                continue
-            domain = extract_domain(url)
-            if not domain:
-                continue
-            hits.append(
-                SearchHit(
-                    title=item.get("title", "") or "",
-                    url=url,
-                    snippet=item.get("description", "") or "",
-                    domain=domain,
-                    discovery_query=query,
-                    iteration=iteration,
-                    source_adapter=self.name,
-                    channel=self.channel,
-                )
+            hit = _make_hit(
+                self,
+                title=item.get("title", "") or "",
+                url=item.get("url", "") or "",
+                snippet=item.get("description", "") or "",
+                query=query,
+                iteration=iteration,
             )
+            if hit is not None:
+                hits.append(hit)
         return hits, True
 
 
@@ -432,7 +497,15 @@ class SerpApiAdapter:
     name = "serpapi"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, timeout: float = 10.0, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        timeout: float = 10.0,
+        proxy: str | None = None,
+        rate_limiter: RateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.api_key = api_key
         self.timeout = timeout
         self.proxy = proxy
@@ -450,9 +523,7 @@ class SerpApiAdapter:
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key:
             return [], False
-
-        if self.rate_limiter is not None and not self.rate_limiter.acquire():
-            logger.warning("SerpAPI rate limit exhausted, skipping call")
+        if not _rate_limit_ok(self.rate_limiter, "SerpAPI"):
             return [], False
 
         params = {
@@ -472,35 +543,24 @@ class SerpApiAdapter:
                 data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("SerpAPI search failed for '%s': %s", query, e)
-            if self.circuit_breaker is not None:
-                self.circuit_breaker.record_failure()
+            _record_failure(self.circuit_breaker)
             return [], False
 
-        if self.circuit_breaker is not None:
-            self.circuit_breaker.record_success()
-
+        _record_success(self.circuit_breaker)
         hits: list[SearchHit] = []
         for item in data.get("organic_results", []):
             if not isinstance(item, dict):
                 continue
-            url = item.get("link", "") or ""
-            if not url.startswith("http"):
-                continue
-            domain = extract_domain(url)
-            if not domain:
-                continue
-            hits.append(
-                SearchHit(
-                    title=item.get("title", "") or "",
-                    url=url,
-                    snippet=item.get("snippet", "") or "",
-                    domain=domain,
-                    discovery_query=query,
-                    iteration=iteration,
-                    source_adapter=self.name,
-                    channel=self.channel,
-                )
+            hit = _make_hit(
+                self,
+                title=item.get("title", "") or "",
+                url=item.get("link", "") or "",
+                snippet=item.get("snippet", "") or "",
+                query=query,
+                iteration=iteration,
             )
+            if hit is not None:
+                hits.append(hit)
         return hits, True
 
 
@@ -568,6 +628,14 @@ def discover_for_queries(
             return adapter.name, [], False
         return adapter.name, a_hits, used
 
+    def _absorb(name: str, a_hits: list[SearchHit], used: bool) -> None:
+        if used and name not in engines:
+            engines.append(name)
+        before = len(hits)
+        hits[:] = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
+        if len(hits) > before and name not in engines_with_hits:
+            engines_with_hits.append(name)
+
     if parallel and len(active) > 1:
         from concurrent.futures import ThreadPoolExecutor
 
@@ -584,12 +652,7 @@ def discover_for_queries(
                 for name, a_hits, used in results:
                     if len(hits) >= max_hits:
                         break
-                    if used and name not in engines:
-                        engines.append(name)
-                    before = len(hits)
-                    hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
-                    if len(hits) > before and name not in engines_with_hits:
-                        engines_with_hits.append(name)
+                    _absorb(name, a_hits, used)
         return hits, engines, engines_with_hits
 
     for q in queries:
@@ -599,12 +662,7 @@ def discover_for_queries(
             if len(hits) >= max_hits:
                 break
             needed = max_hits - len(hits)
-            before = len(hits)
             _name, a_hits, used = _call_adapter(adapter, q, min(per_query, needed))
-            if used and adapter.name not in engines:
-                engines.append(adapter.name)
-            hits = merge_hits(hits, a_hits, max_hits=max_hits, ignored_domains=ignored_domains)
-            if len(hits) > before and adapter.name not in engines_with_hits:
-                engines_with_hits.append(adapter.name)
+            _absorb(_name, a_hits, used)
 
     return hits, engines, engines_with_hits

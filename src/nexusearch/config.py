@@ -36,3 +36,13 @@ class NexusSearchSettings:
             serpapi_api_key=os.getenv("SERPAPI_API_KEY") or None,
             proxy_url=os.getenv("NEXUSEARCH_PROXY_URL") or None,
         )
+
+    def as_client_kwargs(self) -> dict[str, str | None]:
+        """Constructor kwargs shared by NexusSearchClient / AsyncNexusSearchClient."""
+        return {
+            "tavily_api_key": self.tavily_api_key,
+            "firecrawl_api_key": self.firecrawl_api_key,
+            "brave_api_key": self.brave_api_key,
+            "serpapi_api_key": self.serpapi_api_key,
+            "proxy_url": self.proxy_url,
+        }

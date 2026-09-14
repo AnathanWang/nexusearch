@@ -11,7 +11,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from nexusearch.discovery import extract_domain
-from nexusearch.http_util import request_with_retries
+from nexusearch.http_util import backoff_delay, request_with_retries
 from nexusearch.models import PageEvidence, PageSnippet, SearchHit
 from nexusearch.profile import SearchProfile
 from nexusearch.url_safety import (
@@ -114,7 +114,7 @@ def _pinned_fetch_text(
         if status == 200 and body:
             return _html_to_text(body)
         if status in (429, 500, 502, 503, 504) and i < attempts - 1:
-            time.sleep(0.35 * (2**i))
+            time.sleep(backoff_delay(i))
             continue
         last_text = ""
         break
@@ -165,6 +165,48 @@ def _firecrawl_fetch(
         return str(md)[:12000]
     except Exception as e:  # noqa: BLE001
         logger.debug("Firecrawl fetch failed for %s: %s", url, e)
+        return ""
+
+
+def _fetch_page_text(
+    url: str,
+    *,
+    domain: str,
+    firecrawl_api_key: str | None,
+    proxy: str | None,
+    client: httpx.Client,
+    attempts: int,
+    deadline: float | None,
+    allow_firecrawl: bool,
+) -> str:
+    """Fetch strategy chain: Firecrawl (trusted egress) → proxy → DNS-pinned direct."""
+    if allow_firecrawl and firecrawl_api_key:
+        text = _firecrawl_fetch(
+            url,
+            firecrawl_api_key,
+            expected_domain=domain,
+            attempts=attempts,
+            deadline=deadline,
+        )
+        if text:
+            return text
+    try:
+        if proxy:
+            return _proxy_fetch_text(
+                client,
+                url,
+                expected_domain=domain,
+                attempts=attempts,
+                deadline=deadline,
+            )
+        return _pinned_fetch_text(
+            url,
+            expected_domain=domain,
+            attempts=attempts,
+            deadline=deadline,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("deep-read failed %s: %s", url, e)
         return ""
 
 
@@ -224,36 +266,16 @@ def read_domain_evidence(
             if check_url_host(url, expected_domain=domain) is None:
                 continue
 
-            text = ""
-            if allow_firecrawl and firecrawl_api_key:
-                text = _firecrawl_fetch(
-                    url,
-                    firecrawl_api_key,
-                    expected_domain=domain,
-                    attempts=max_fetch_attempts,
-                    deadline=deadline,
-                )
-            if not text:
-                try:
-                    if proxy:
-                        text = _proxy_fetch_text(
-                            client,
-                            url,
-                            expected_domain=domain,
-                            attempts=max_fetch_attempts,
-                            deadline=deadline,
-                        )
-                    else:
-                        text = _pinned_fetch_text(
-                            url,
-                            expected_domain=domain,
-                            attempts=max_fetch_attempts,
-                            deadline=deadline,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("deep-read failed %s: %s", url, e)
-                    text = ""
-
+            text = _fetch_page_text(
+                url,
+                domain=domain,
+                firecrawl_api_key=firecrawl_api_key,
+                proxy=proxy,
+                client=client,
+                attempts=max_fetch_attempts,
+                deadline=deadline,
+                allow_firecrawl=allow_firecrawl,
+            )
             if not text:
                 continue
 

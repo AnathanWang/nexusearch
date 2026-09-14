@@ -67,14 +67,10 @@ class AsyncNexusSearchClient:
         s = settings or NexusSearchSettings.from_env()
         return cls(
             profile=profile,
-            tavily_api_key=s.tavily_api_key,
-            firecrawl_api_key=s.firecrawl_api_key,
-            brave_api_key=s.brave_api_key,
-            serpapi_api_key=s.serpapi_api_key,
-            proxy_url=s.proxy_url,
             llm=llm,
             adapters=adapters,
             hooks=hooks,
+            **s.as_client_kwargs(),
         )
 
     async def search(self, query: str, options: NexusSearchOptions | None = None) -> SearchBundle:

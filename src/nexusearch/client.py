@@ -14,7 +14,7 @@ from nexusearch.discovery import (
     extract_domain,
     matches_ignored,
 )
-from nexusearch.hooks import emit_hooks_sync
+from nexusearch.hooks import SearchHooks, emit_hooks_sync
 from nexusearch.llm_protocol import LlmJsonClient
 from nexusearch.models import NexusSearchOptions, SearchBundle, SearchHit, SearchMeta
 from nexusearch.page_reader import deep_read_hits
@@ -23,6 +23,12 @@ from nexusearch.profile import SearchProfile
 logger = logging.getLogger(__name__)
 
 _EMPTY_MSG = "No live search hits found."
+
+
+def _merge_unique(dst: list[str], src: list[str]) -> None:
+    for item in src:
+        if item not in dst:
+            dst.append(item)
 
 
 def _apply_profile_geo_filter(hits: list[SearchHit], profile: SearchProfile) -> list[SearchHit]:
@@ -86,7 +92,7 @@ class NexusSearchClient:
         proxy_url: str | None = None,
         llm: LlmJsonClient | None = None,
         adapters: Sequence[DiscoveryAdapter] | None = None,
-        hooks: Sequence = (),
+        hooks: Sequence[SearchHooks] = (),
     ) -> None:
         if profile is None:
             raise TypeError("NexusSearchClient requires a SearchProfile")
@@ -120,16 +126,7 @@ class NexusSearchClient:
         adapters: Sequence[DiscoveryAdapter] | None = None,
     ) -> NexusSearchClient:
         s = settings or NexusSearchSettings.from_env()
-        return cls(
-            profile=profile,
-            tavily_api_key=s.tavily_api_key,
-            firecrawl_api_key=s.firecrawl_api_key,
-            brave_api_key=s.brave_api_key,
-            serpapi_api_key=s.serpapi_api_key,
-            proxy_url=s.proxy_url,
-            llm=llm,
-            adapters=adapters,
-        )
+        return cls(profile=profile, llm=llm, adapters=adapters, **s.as_client_kwargs())
 
     def search(self, query: str, options: NexusSearchOptions | None = None) -> SearchBundle:
         opts = options or NexusSearchOptions()
@@ -157,24 +154,11 @@ class NexusSearchClient:
         )
         queries_used.extend(iter1)
         emit_hooks_sync(self._hooks, "on_queries_planned", list(iter1), iteration=1)
-        hits, eng1, hit1 = discover_for_queries(
-            iter1,
-            adapters=adapters,
-            tavily_api_key=self.tavily_api_key,
-            brave_api_key=self.brave_api_key,
-            serpapi_api_key=self.serpapi_api_key,
-            proxy=proxy,
-            iteration=1,
-            max_hits=opts.max_hits,
-            ignored_domains=ignored,
-            parallel=opts.parallel_adapters,
+        hits, eng1, hit1 = self._discover(
+            iter1, iteration=1, opts=opts, proxy=proxy, adapters=adapters, ignored=ignored
         )
-        for e in eng1:
-            if e not in engines:
-                engines.append(e)
-        for e in hit1:
-            if e not in engines_with_hits:
-                engines_with_hits.append(e)
+        _merge_unique(engines, eng1)
+        _merge_unique(engines_with_hits, hit1)
         iterations_run = 1
 
         if opts.enable_iter2 and hits and len(hits) < opts.max_hits:
@@ -187,25 +171,12 @@ class NexusSearchClient:
             if iter2:
                 emit_hooks_sync(self._hooks, "on_queries_planned", list(iter2), iteration=2)
                 queries_used.extend(iter2)
-                hits, eng2, hit2 = discover_for_queries(
-                    iter2,
-                    adapters=adapters,
-                    tavily_api_key=self.tavily_api_key,
-                    brave_api_key=self.brave_api_key,
-                    serpapi_api_key=self.serpapi_api_key,
-                    proxy=proxy,
-                    iteration=2,
-                    max_hits=opts.max_hits,
-                    ignored_domains=ignored,
-                    existing=hits,
-                    parallel=opts.parallel_adapters,
+                hits, eng2, hit2 = self._discover(
+                    iter2, iteration=2, opts=opts, proxy=proxy, adapters=adapters,
+                    ignored=ignored, existing=hits,
                 )
-                for e in eng2:
-                    if e not in engines:
-                        engines.append(e)
-                for e in hit2:
-                    if e not in engines_with_hits:
-                        engines_with_hits.append(e)
+                _merge_unique(engines, eng2)
+                _merge_unique(engines_with_hits, hit2)
                 iterations_run = 2
 
         hits = hits[: opts.max_hits]
@@ -252,3 +223,28 @@ class NexusSearchClient:
             message=message,
         )
         return SearchBundle(hits=hits, meta=meta)
+
+    def _discover(
+        self,
+        queries: list[str],
+        *,
+        iteration: int,
+        opts: NexusSearchOptions,
+        proxy: str | None,
+        adapters: Sequence[DiscoveryAdapter],
+        ignored: tuple[str, ...],
+        existing: list[SearchHit] | None = None,
+    ) -> tuple[list[SearchHit], list[str], list[str]]:
+        return discover_for_queries(
+            queries,
+            adapters=adapters,
+            tavily_api_key=self.tavily_api_key,
+            brave_api_key=self.brave_api_key,
+            serpapi_api_key=self.serpapi_api_key,
+            proxy=proxy,
+            iteration=iteration,
+            max_hits=opts.max_hits,
+            ignored_domains=ignored,
+            existing=existing,
+            parallel=opts.parallel_adapters,
+        )

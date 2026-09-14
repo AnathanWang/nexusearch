@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (0.x: minor bumps may contain breaking changes until 1.0).
 
+## [0.5.1] — 2026-09-14
+
+### Changed
+
+- Internal refactor, no public API changes: shared hit-builder + guard
+  helpers across discovery adapters, DDG adapter split into library/scrape
+  strategies with a single exit point (breaker now records on every path),
+  `_merge_unique` / `_discover` in the client, typed `hooks` param,
+  `NexusSearchSettings.as_client_kwargs()` removes the triple-duplicated
+  settings→kwargs mapping, `RuleRouter._match_rule` shared with HybridRouter,
+  fetch strategy chain extracted in page_reader, shared `backoff_delay`.
+
 ## [0.5.0] — 2026-09-14
 
 ### Added
@@ -95,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSRF hardening: CGNAT range blocking, 2 MB body cap, deep-read deadlines,
   Firecrawl client isolation.
 
+[0.5.1]: https://github.com/AnathanWang/nexusearch/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AnathanWang/nexusearch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/AnathanWang/nexusearch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AnathanWang/nexusearch/compare/v0.3.0...v0.4.0

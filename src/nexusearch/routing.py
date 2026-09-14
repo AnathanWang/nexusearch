@@ -49,6 +49,13 @@ class RuleRouter:
                 raise ValueError(f"invalid RouteRule pattern {r.pattern!r}: {e}") from e
         self._compiled = tuple(compiled)
 
+    def _match_rule(self, query: str) -> str | None:
+        """First matching rule's profile name, or None."""
+        for name, rx in self._compiled:
+            if rx.search(query):
+                return name
+        return None
+
     def route(
         self,
         query: str,
@@ -56,10 +63,7 @@ class RuleRouter:
         llm: LlmJsonClient | None = None,
         descriptions: Mapping[str, str] | None = None,
     ) -> str:
-        for name, rx in self._compiled:
-            if rx.search(query):
-                return name
-        return self.default
+        return self._match_rule(query) or self.default
 
 
 class HybridRouter(RuleRouter):
@@ -73,9 +77,9 @@ class HybridRouter(RuleRouter):
         llm: LlmJsonClient | None = None,
         descriptions: Mapping[str, str] | None = None,
     ) -> str:
-        for name, rx in self._compiled:
-            if rx.search(query):
-                return name
+        matched = self._match_rule(query)
+        if matched is not None:
+            return matched
         if llm is not None and descriptions:
             chosen = self._llm_route(query, llm, descriptions)
             if chosen is not None:

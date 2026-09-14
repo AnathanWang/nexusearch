@@ -17,6 +17,11 @@ T = TypeVar("T")
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+def backoff_delay(attempt: int, *, base: float = 0.35) -> float:
+    """Exponential backoff for manual retry loops (with_retries adds its own jitter)."""
+    return base * (2**attempt)
+
+
 def with_retries(
     fn: Callable[[], T],
     *,
