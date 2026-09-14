@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (0.x: minor bumps may contain breaking changes until 1.0).
 
+## [0.5.0] — 2026-09-14
+
+### Added
+
+- **Ops hardening**: `RateLimiter` (thread-safe token bucket),
+  `CircuitBreaker` (open after N consecutive failures, half-open after
+  cooldown), `CostBudget` (credits budget for paid APIs).
+- **Adapter guards**: all built-in discovery adapters (Tavily, Brave, SerpAPI,
+  DuckDuckGo) accept optional `rate_limiter` / `circuit_breaker`. An exhausted
+  limiter or open breaker returns `([], False)` — "not attempted", never a
+  fake empty result; breaker records failure only when the call actually
+  fails, success only on a real response.
+- **`RedisSearchCache`**: multi-instance cache backend, same key format as
+  `SearchCache` (extra: `pip install "nexusearch[redis]"`).
+- `tests/test_live_smoke.py`: opt-in live checks against real APIs
+  (`NEXUSEARCH_LIVE_TESTS=1`).
+- COOKBOOK: sections on API quotas and Prometheus metrics via `SearchHooks`.
+
 ## [0.4.1] — 2026-09-14
 
 ### Changed
@@ -77,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSRF hardening: CGNAT range blocking, 2 MB body cap, deep-read deadlines,
   Firecrawl client isolation.
 
+[0.5.0]: https://github.com/AnathanWang/nexusearch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/AnathanWang/nexusearch/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AnathanWang/nexusearch/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AnathanWang/nexusearch/compare/v0.2.1...v0.3.0

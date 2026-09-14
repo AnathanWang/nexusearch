@@ -243,3 +243,64 @@ cache.set(key, bundle)
 budget = Budget(max_seconds=45)
 # проверяйте budget.expired между тяжёлыми стадиями в своих адаптерах
 ```
+
+### Квоты платных API: RateLimiter, CircuitBreaker, CostBudget
+
+```python
+from nexusearch import BraveAdapter, CircuitBreaker, CostBudget, RateLimiter, TavilyAdapter
+
+# Не больше 30 вызовов Tavily в минуту; при исчерпании адаптер
+# честно возвращает ([], False) — "не пытался", а не "пустой результат".
+tavily_limiter = RateLimiter(30, per_seconds=60.0)
+
+# После 3 подряд сетевых ошибок адаптер молчит 5 минут (half-open после).
+brave_breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
+
+# Жёсткий денежный лимит: charge() вернёт False, когда кредиты кончатся.
+credits = CostBudget(max_credits=500)
+
+adapters = [
+    TavilyAdapter(tavily_key, rate_limiter=tavily_limiter),
+    BraveAdapter(brave_key, circuit_breaker=brave_breaker),
+]
+# CostBudget подключается в своих адаптерах:
+#     if not credits.charge(): return [], False
+```
+
+Один и тот же limiter/breaker можно шарить между адаптерами — оба потокобезопасны
+(`parallel_adapters=True` гоняет адаптеры в пуле потоков).
+
+## Метрики (Prometheus)
+
+Хуки уже встроены в клиент — метрики подключаются без правок библиотеки.
+Ошибки хуков глушатся `HookPipeline` и логируются: метрики не могут уронить поиск.
+
+```python
+from prometheus_client import Counter, Histogram
+
+
+class PrometheusHooks:
+    def __init__(self) -> None:
+        self.searches = Counter("nexusearch_searches_total", "Searches", ["profile"])
+        self.errors = Counter("nexusearch_errors_total", "Search errors", ["profile"])
+        self.latency = Histogram("nexusearch_search_seconds", "Search latency", ["profile"])
+        self.rejected = Counter("nexusearch_rejected_total", "Rejected domains", ["profile"])
+
+    def on_search_end(self, bundle, *, elapsed_ms: float) -> None:
+        profile = bundle.meta.profile or "unknown"
+        self.searches.labels(profile).inc()
+        self.latency.labels(profile).observe(elapsed_ms / 1000)
+        if bundle.meta.rejected_count:
+            self.rejected.labels(profile).inc(bundle.meta.rejected_count)
+
+    def on_search_error(self, error, *, elapsed_ms: float) -> None:
+        self.errors.labels("unknown").inc()
+
+
+# client = NexusSearchClient(profile=..., adapters=..., hooks=[PrometheusHooks()])
+```
+
+Доступные хуки: `on_search_start(query, options)`,
+`on_queries_planned(queries, iteration=...)`, `on_hit_discovered(hit)`,
+`on_search_end(bundle, elapsed_ms=...)`, `on_search_error(error, elapsed_ms=...)`.
+Реализовывать можно любое подмножество — отсутствующие методы просто пропускаются.

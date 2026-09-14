@@ -3,6 +3,7 @@
 from nexusearch.adapters_llm import LlmGroundedAdapter
 from nexusearch.async_client import AsyncNexusSearchClient
 from nexusearch.channel_adapter import DomainChannelAdapter
+from nexusearch.circuit import CircuitBreaker
 from nexusearch.client import NexusSearchClient
 from nexusearch.config import NexusSearchSettings
 from nexusearch.discovery import (
@@ -24,8 +25,10 @@ from nexusearch.models import (
     SearchHit,
     SearchMeta,
 )
-from nexusearch.ops import Budget, SearchCache
+from nexusearch.ops import Budget, CostBudget, SearchCache
 from nexusearch.profile import SearchProfile
+from nexusearch.ratelimit import RateLimiter
+from nexusearch.redis_cache import RedisSearchCache
 from nexusearch.routing import HybridRouter, RoutedSearchClient, RouteRule, RuleRouter
 from nexusearch.simple_profile import SimpleSearchProfile
 
@@ -33,6 +36,8 @@ __all__ = [
     "AsyncNexusSearchClient",
     "BraveAdapter",
     "Budget",
+    "CircuitBreaker",
+    "CostBudget",
     "DiscoveryAdapter",
     "DomainChannelAdapter",
     "DuckDuckGoAdapter",
@@ -46,6 +51,8 @@ __all__ = [
     "NexusSearchSettings",
     "PageEvidence",
     "PageSnippet",
+    "RateLimiter",
+    "RedisSearchCache",
     "RouteRule",
     "RoutedSearchClient",
     "RuleRouter",
@@ -62,4 +69,4 @@ __all__ = [
     "emit_hooks_sync",
 ]
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

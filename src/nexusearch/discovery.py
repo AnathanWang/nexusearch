@@ -12,8 +12,10 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
+from nexusearch.circuit import CircuitBreaker
 from nexusearch.http_util import request_with_retries
 from nexusearch.models import SearchHit
+from nexusearch.ratelimit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +114,11 @@ class TavilyAdapter:
     name = "tavily"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, attempts: int = 3) -> None:
+    def __init__(self, api_key: str | None, *, attempts: int = 3, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
         self.api_key = api_key
         self.attempts = attempts
+        self.rate_limiter = rate_limiter
+        self.circuit_breaker = circuit_breaker
 
     def discover(
         self,
@@ -125,6 +129,10 @@ class TavilyAdapter:
         ignored_domains: Sequence[str] = (),
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key or TavilyClient is None:
+            return [], False
+
+        if self.rate_limiter is not None and not self.rate_limiter.acquire():
+            logger.warning("Tavily rate limit exhausted, skipping call")
             return [], False
 
         last_err: Exception | None = None
@@ -143,6 +151,8 @@ class TavilyAdapter:
                 last_err = e
                 if i >= self.attempts - 1:
                     logger.warning("Tavily search failed for '%s': %s", query, e)
+                    if self.circuit_breaker is not None:
+                        self.circuit_breaker.record_failure()
                     return [], False
                 delay = 0.35 * (2**i)
                 logger.debug("Tavily retry %s/%s: %s", i + 1, self.attempts, e)
@@ -151,6 +161,9 @@ class TavilyAdapter:
         if not isinstance(search_res, dict):
             logger.warning("Tavily search failed for '%s': %s", query, last_err)
             return [], False
+
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
 
         hits: list[SearchHit] = []
         results = search_res.get("results") or []
@@ -218,8 +231,10 @@ class DuckDuckGoAdapter:
     name = "ddg"
     channel = "serp"
 
-    def __init__(self, proxy: str | None = None) -> None:
+    def __init__(self, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
         self.proxy = proxy
+        self.rate_limiter = rate_limiter
+        self.circuit_breaker = circuit_breaker
 
     def discover(
         self,
@@ -232,6 +247,11 @@ class DuckDuckGoAdapter:
         hits: list[SearchHit] = []
         seen: set[str] = set()
         used = False
+
+        # Rate limit check
+        if self.rate_limiter is not None and not self.rate_limiter.acquire():
+            logger.warning("DDG rate limit exhausted, skipping call")
+            return [], False
 
         if DDGS is not None:
             try:
@@ -311,6 +331,12 @@ class DuckDuckGoAdapter:
         except Exception as e:  # noqa: BLE001
             logger.debug("DDG HTML fallback failed for '%s': %s", query, e)
 
+        if self.circuit_breaker is not None:
+            if used:
+                self.circuit_breaker.record_success()
+            else:
+                self.circuit_breaker.record_failure()
+
         return hits, used
 
 
@@ -320,10 +346,12 @@ class BraveAdapter:
     name = "brave"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, timeout: float = 8.0, proxy: str | None = None) -> None:
+    def __init__(self, api_key: str | None, *, timeout: float = 8.0, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
         self.api_key = api_key
         self.timeout = timeout
         self.proxy = proxy
+        self.rate_limiter = rate_limiter
+        self.circuit_breaker = circuit_breaker
 
     def discover(
         self,
@@ -335,6 +363,11 @@ class BraveAdapter:
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key:
             return [], False
+        
+        if self.rate_limiter is not None and not self.rate_limiter.acquire():
+            logger.warning("Brave rate limit exhausted, skipping call")
+            return [], False
+
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
@@ -357,7 +390,12 @@ class BraveAdapter:
                 data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("Brave search failed for '%s': %s", query, e)
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure()
             return [], False
+
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
 
         hits: list[SearchHit] = []
         for item in (data.get("web") or {}).get("results", []):
@@ -394,10 +432,12 @@ class SerpApiAdapter:
     name = "serpapi"
     channel = "serp"
 
-    def __init__(self, api_key: str | None, *, timeout: float = 10.0, proxy: str | None = None) -> None:
+    def __init__(self, api_key: str | None, *, timeout: float = 10.0, proxy: str | None = None, rate_limiter: RateLimiter | None = None, circuit_breaker: CircuitBreaker | None = None) -> None:
         self.api_key = api_key
         self.timeout = timeout
         self.proxy = proxy
+        self.rate_limiter = rate_limiter
+        self.circuit_breaker = circuit_breaker
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
     def discover(
@@ -410,6 +450,11 @@ class SerpApiAdapter:
     ) -> tuple[list[SearchHit], bool]:
         if not self.api_key:
             return [], False
+
+        if self.rate_limiter is not None and not self.rate_limiter.acquire():
+            logger.warning("SerpAPI rate limit exhausted, skipping call")
+            return [], False
+
         params = {
             "engine": "google",
             "q": query,
@@ -427,7 +472,12 @@ class SerpApiAdapter:
                 data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("SerpAPI search failed for '%s': %s", query, e)
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure()
             return [], False
+
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
 
         hits: list[SearchHit] = []
         for item in data.get("organic_results", []):

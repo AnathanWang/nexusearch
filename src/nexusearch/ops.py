@@ -68,3 +68,39 @@ class Budget:
 
     def remaining(self) -> float:
         return max(0.0, self.max_seconds - self.elapsed)
+
+
+@dataclass
+class CostBudget:
+    """Credits budget for paid APIs (thread-safe).
+
+    Separate from the wall-clock Budget: charge() returns False (without
+    charging) if the spend would exceed max_credits.
+    """
+
+    max_credits: float
+    _spent: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self) -> None:
+        if self.max_credits <= 0:
+            raise ValueError("max_credits must be > 0")
+
+    def charge(self, credits: float = 1.0) -> bool:
+        if credits <= 0:
+            raise ValueError("credits must be > 0")
+        with self._lock:
+            if self._spent + credits > self.max_credits:
+                return False
+            self._spent += credits
+            return True
+
+    @property
+    def spent(self) -> float:
+        with self._lock:
+            return self._spent
+
+    @property
+    def remaining(self) -> float:
+        with self._lock:
+            return max(0.0, self.max_credits - self._spent)

@@ -1,6 +1,6 @@
 [project]
 name = "nexusearch"
-version = "0.4.1"
+version = "0.5.0"
 description = "Universal multi-iteration live web discovery + deep page reading (profile-driven)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 tavily = ["tavily-python>=0.3.3"]
 dev = ["pytest>=8.0.0", "ruff>=0.4.0"]
+redis = ["redis>=5.0.0"]
 
 [build-system]
 requires = ["hatchling"]
