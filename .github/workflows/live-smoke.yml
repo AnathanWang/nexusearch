@@ -1,0 +1,23 @@
+name: Live smoke
+
+# Nightly check against real search APIs (markup drift detector).
+# Requires the TAVILY_API_KEY repo secret; DDG runs keyless.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - run: uv sync --extra dev --extra tavily
+
+      - run: uv run pytest tests/test_live_smoke.py -q
+        env:
+          NEXUSEARCH_LIVE_TESTS: "1"
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}

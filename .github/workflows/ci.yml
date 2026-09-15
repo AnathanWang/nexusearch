@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra tavily --python ${{ matrix.python-version }}
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Tests (unit; live smoke is opt-in via NEXUSEARCH_LIVE_TESTS)
+        run: uv run pytest tests/ -q --ignore=tests/test_live_smoke.py --cov --cov-report=term
+
+      - name: Build wheel + sdist
+        run: uv build

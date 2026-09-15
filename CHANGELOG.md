@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (0.x: minor bumps may contain breaking changes until 1.0).
 
+## [0.5.2] — 2026-09-15
+
+### Added
+
+- `py.typed` marker — consumers' type checkers now use the library's annotations.
+- CI: GitHub Actions (ruff + pytest matrix py3.11–3.13 + coverage gate 75% +
+  wheel build), nightly live-smoke workflow (opt-in, `TAVILY_API_KEY` secret),
+  trusted-publishing workflow for PyPI releases on `v*` tags.
+- `SECURITY.md` — vulnerability reporting policy.
+- Tests: `test_http_util.py`, `test_redis_cache.py` (redis_cache 100%).
+
+### Changed
+
+- Dependency: deprecated `duckduckgo-search` replaced by its successor `ddgs`.
+- Adapters now reuse one lazily-created `httpx.Client` / `TavilyClient` per
+  instance (thread-safe) instead of a fresh client per query — fewer TLS
+  handshakes under load. New `close()` on adapters for explicit teardown.
+
 ## [0.5.1] — 2026-09-14
 
 ### Changed
@@ -107,6 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SSRF hardening: CGNAT range blocking, 2 MB body cap, deep-read deadlines,
   Firecrawl client isolation.
 
+[0.5.2]: https://github.com/AnathanWang/nexusearch/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/AnathanWang/nexusearch/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AnathanWang/nexusearch/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/AnathanWang/nexusearch/compare/v0.4.0...v0.4.1

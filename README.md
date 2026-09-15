@@ -12,7 +12,7 @@ The library is a smart but **blind** search agent: domain behavior is **not** bu
 
 ```toml
 # pyproject.toml of the consumer app
-nexusearch = { git = "https://github.com/AnathanWang/nexusearch", rev = "v0.5.1" }
+nexusearch = { git = "https://github.com/AnathanWang/nexusearch", rev = "v0.5.2" }
 ```
 
 Optional extras:
@@ -99,6 +99,7 @@ Profiles restrict channels via `channels=("serp", ...)`; the client filters adap
 - `CostBudget(max_credits)` — credits budget for paid APIs
 - `SearchCache` / `RedisSearchCache` — TTL cache, same key format
 - `Budget(max_seconds)` — wall-clock guard
+- Adapters reuse one `httpx.Client` per instance (thread-safe); call `adapter.close()` on teardown
 - `SearchHooks` — `on_search_start/queries_planned/hit_discovered/search_end/search_error` (sync & async; hook errors are logged, never raised)
 - `AsyncNexusSearchClient` — async facade over the sync pipeline
 

@@ -1,0 +1,25 @@
+name: Publish
+
+# Trusted publishing: no API tokens in the repo. One-time PyPI setup:
+# PyPI → project "nexusearch" → Publishing → add GitHub publisher
+# (owner: AnathanWang, repo: nexusearch, workflow: publish.yml, env: pypi).
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

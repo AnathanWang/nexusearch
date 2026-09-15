@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
@@ -97,6 +98,33 @@ def merge_hits(
 
 # --- adapter internals ------------------------------------------------------
 
+_CLIENT_INIT_LOCK = threading.Lock()
+
+
+class _ReusableHttp:
+    """Mixin: one lazily-created httpx.Client per adapter instance.
+
+    httpx.Client is thread-safe, so sharing is safe under parallel_adapters.
+    Call close() when the adapter is done (process teardown, tests).
+    """
+
+    _client: httpx.Client | None = None
+
+    def _http(self, *, proxy: str | None, timeout: float) -> httpx.Client:
+        if self._client is None:
+            with _CLIENT_INIT_LOCK:
+                if self._client is None:
+                    self._client = httpx.Client(
+                        proxy=proxy, timeout=timeout, follow_redirects=True
+                    )
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+
 def _rate_limit_ok(limiter: RateLimiter | None, adapter_name: str) -> bool:
     """Shared guard preamble: an exhausted limiter means 'not attempted'."""
     if limiter is None or limiter.acquire():
@@ -169,6 +197,8 @@ class TavilyAdapter:
     name = "tavily"
     channel = "serp"
 
+    _tavily: object | None = None  # lazily-created TavilyClient, shared across calls
+
     def __init__(
         self,
         api_key: str | None,
@@ -181,6 +211,13 @@ class TavilyAdapter:
         self.attempts = attempts
         self.rate_limiter = rate_limiter
         self.circuit_breaker = circuit_breaker
+
+    def _tavily_client(self):
+        if self._tavily is None:
+            with _CLIENT_INIT_LOCK:
+                if self._tavily is None:
+                    self._tavily = TavilyClient(api_key=self.api_key)
+        return self._tavily
 
     def discover(
         self,
@@ -199,8 +236,7 @@ class TavilyAdapter:
         search_res: dict | None = None
         for i in range(max(1, self.attempts)):
             try:
-                client = TavilyClient(api_key=self.api_key)
-                search_res = client.search(
+                search_res = self._tavily_client().search(
                     query=query,
                     search_depth="advanced",
                     max_results=max_results,
@@ -274,7 +310,7 @@ def _parse_ddg_html_items(html_text: str) -> list[dict[str, str]]:
     return items
 
 
-class DuckDuckGoAdapter:
+class DuckDuckGoAdapter(_ReusableHttp):
     """DDG discovery: ddgs library first, HTML scrape as fallback."""
 
     name = "ddg"
@@ -384,33 +420,32 @@ class DuckDuckGoAdapter:
     ) -> bool:
         """Scrape path; True only on an HTTP 200 page."""
         try:
-            with httpx.Client(proxy=self.proxy, timeout=8.0, follow_redirects=True) as client:
-                resp = request_with_retries(
-                    client,
-                    "GET",
-                    "https://html.duckduckgo.com/html/",
-                    attempts=3,
-                    params={"q": query},
-                    headers=_DDG_HEADERS,
+            resp = request_with_retries(
+                self._http(proxy=self.proxy, timeout=8.0),
+                "GET",
+                "https://html.duckduckgo.com/html/",
+                attempts=3,
+                params={"q": query},
+                headers=_DDG_HEADERS,
+            )
+            if resp.status_code != 200:
+                return False
+            for item in _parse_ddg_html_items(resp.text):
+                self._append(
+                    hits, seen,
+                    title=item["title"],
+                    url=item["url"],
+                    snippet=item["snippet"],
+                    query=query, iteration=iteration,
+                    max_results=max_results, ignored_domains=ignored_domains,
                 )
-                if resp.status_code != 200:
-                    return False
-                for item in _parse_ddg_html_items(resp.text):
-                    self._append(
-                        hits, seen,
-                        title=item["title"],
-                        url=item["url"],
-                        snippet=item["snippet"],
-                        query=query, iteration=iteration,
-                        max_results=max_results, ignored_domains=ignored_domains,
-                    )
-                return True
+            return True
         except Exception as e:  # noqa: BLE001
             logger.debug("DDG HTML fallback failed for '%s': %s", query, e)
             return False
 
 
-class BraveAdapter:
+class BraveAdapter(_ReusableHttp):
     """Brave Search API adapter (BRAVE_API_KEY)."""
 
     name = "brave"
@@ -450,20 +485,19 @@ class BraveAdapter:
             "X-Subscription-Token": self.api_key,
         }
         try:
-            with httpx.Client(proxy=self.proxy, timeout=self.timeout, follow_redirects=True) as client:
-                resp = request_with_retries(
-                    client,
-                    "GET",
-                    "https://api.search.brave.com/res/v1/web/search",
-                    attempts=3,
-                    # Brave caps `count` at 20 per request.
-                    params={"q": query, "count": min(max_results, 20)},
-                    headers=headers,
-                )
-                if resp.status_code != 200:
-                    logger.debug("Brave search HTTP %s for '%s'", resp.status_code, query)
-                    return [], False
-                data = resp.json()
+            resp = request_with_retries(
+                self._http(proxy=self.proxy, timeout=self.timeout),
+                "GET",
+                "https://api.search.brave.com/res/v1/web/search",
+                attempts=3,
+                # Brave caps `count` at 20 per request.
+                params={"q": query, "count": min(max_results, 20)},
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                logger.debug("Brave search HTTP %s for '%s'", resp.status_code, query)
+                return [], False
+            data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("Brave search failed for '%s': %s", query, e)
             _record_failure(self.circuit_breaker)
@@ -487,7 +521,7 @@ class BraveAdapter:
         return hits, True
 
 
-class SerpApiAdapter:
+class SerpApiAdapter(_ReusableHttp):
     """SerpAPI Google adapter (SERPAPI_API_KEY).
 
     Note: SerpAPI requires the key in the query string; httpx logs full request
@@ -533,14 +567,14 @@ class SerpApiAdapter:
             "api_key": self.api_key,
         }
         try:
-            with httpx.Client(proxy=self.proxy, timeout=self.timeout, follow_redirects=True) as client:
-                resp = request_with_retries(
-                    client, "GET", "https://serpapi.com/search.json", attempts=3, params=params
-                )
-                if resp.status_code != 200:
-                    logger.debug("SerpAPI HTTP %s for '%s'", resp.status_code, query)
-                    return [], False
-                data = resp.json()
+            resp = request_with_retries(
+                self._http(proxy=self.proxy, timeout=self.timeout),
+                "GET", "https://serpapi.com/search.json", attempts=3, params=params
+            )
+            if resp.status_code != 200:
+                logger.debug("SerpAPI HTTP %s for '%s'", resp.status_code, query)
+                return [], False
+            data = resp.json()
         except Exception as e:  # noqa: BLE001
             logger.warning("SerpAPI search failed for '%s': %s", query, e)
             _record_failure(self.circuit_breaker)
