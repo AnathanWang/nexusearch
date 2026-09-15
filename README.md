@@ -6,7 +6,7 @@ The library is a smart but **blind** search agent: domain behavior is **not** bu
 
 **No invented results. No offline curated fallback.**
 
-- Python ≥ 3.11 · MIT license · [Changelog](CHANGELOG.md) · [Cookbook (рецепты)](docs/COOKBOOK.md)
+- Python ≥ 3.11 · MIT license · [Changelog](CHANGELOG.md) · [Usage guide (подробно)](docs/USAGE.md) · [Cookbook (рецепты)](docs/COOKBOOK.md)
 
 ## Install
 
